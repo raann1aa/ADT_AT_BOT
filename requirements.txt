@@ -1,0 +1,18 @@
+# Farming RAG & AI Agent Dependencies
+chromadb>=1.5.0
+sentence-transformers>=3.0.0
+torch>=2.0.0
+transformers>=4.40.0
+numpy>=1.24.0
+pyyaml>=6.0.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+
+# Optional for subsequent phases (FastAPI backend & Gemini API)
+fastapi>=0.110.0
+uvicorn>=0.28.0
+requests>=2.31.0
+google-generativeai>=0.8.0
+langchain>=0.2.0
+langchain-chroma>=0.1.0
+langchain-google-genai>=1.0.0

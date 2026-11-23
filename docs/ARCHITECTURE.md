@@ -175,100 +175,143 @@ The target architecture replaces ephemeral in-memory state and flatfiles with a 
 
 ---
 
-## 4. Phase 2 Relational Database Schema Design (Preview)
+## 4. Phase 2 Relational Database Architecture & Schema (Implemented)
 
-The database will be implemented using SQLAlchemy ORM with support for PostgreSQL (production) and SQLite (local testing):
+The database is built using SQLAlchemy 2.0 ORM with native support for PostgreSQL (production target via psycopg2) and SQLite (local development and automated testing). Migrations are tracked using Alembic.
 
+### 4.1 Entity Relationship Diagram (ERD)
+
+```mermaid
+erDiagram
+    DISTRICTS ||--o{ DIVISIONS : contains
+    DISTRICTS ||--o{ FARMERS : locates
+    DIVISIONS ||--o{ FACTORIES : clusters
+    DIVISIONS ||--o{ CDOS : assigns
+    DIVISIONS ||--o{ FARMERS : locates
+    FACTORIES ||--o{ CDOS : employs
+    FACTORIES ||--o{ FARMERS : registers
+    CDOS ||--o{ FARMERS : assists
+    CDOS ||--o{ ISSUES : assigned_to
+    AGRONOMISTS ||--o{ ISSUES : escalated_to
+
+    FARMERS ||--o{ FARMER_CONTACTS : has
+    FARMERS ||--o{ FARM_PLOTS : owns
+    FARMERS ||--o{ CONVERSATION_SESSIONS : conducts
+    FARMERS ||--o{ ISSUES : reports
+
+    FARM_PLOTS ||--o{ CROP_RECORDS : cultivates
+    FARM_PLOTS ||--o{ SOIL_PROFILES : analyzed_by
+    FARM_PLOTS ||--o{ ISSUES : occurs_on
+
+    ISSUES ||--o{ FOLLOW_UP_TASKS : generates
+
+    WEBHOOK_EVENTS {
+        int id PK
+        string message_id UK "Unique Meta Message ID"
+        string sender_phone
+        string status "RECEIVED, PROCESSING, COMPLETED, FAILED"
+        datetime created_at
+    }
+
+    AUDIT_LOGS {
+        int id PK
+        string log_id UK
+        datetime timestamp
+        string sender_phone
+        string category
+        string action
+        float processing_time_ms
+    }
 ```
-Table: farmers
-- id: UUID / Integer (Primary Key)
-- farmer_id: String (Unique, e.g. "FAR-MH-NAS-00102")
-- full_name: String
-- primary_phone: String (Unique, indexed, 10 digits)
-- secondary_phone: String (Optional)
-- village: String
-- tehsil: String
-- district: String (Indexed)
-- division: String
-- factory_id: ForeignKey(factories.id)
-- assigned_cdo_id: ForeignKey(cdos.id)
-- preferred_language: String (Default: 'mr')
-- created_at: DateTime
-- updated_at: DateTime
 
-Table: farm_profiles
-- id: UUID / Integer (Primary Key)
-- farmer_id: ForeignKey(farmers.id)
-- total_land_area_acres: Float
-- crop_name: String (Indexed)
-- crop_variety: String
-- planting_date: Date
-- planting_season: String (Suru, Adsali, Pre-seasonal, Kharif, Rabi)
-- growth_stage: String (Sowing, Vegetative, Tillering, Flowering, Harvesting)
-- irrigation_type: String (Drip, Sprinkler, Flood, Rainfed)
-- verification_status: Enum (VERIFIED, UNVERIFIED, MISSING, NEEDS_CORRECTION)
-- last_updated_by: String
+### 4.2 Normalized Database Schema
 
-Table: soil_profiles
-- id: UUID / Integer (Primary Key)
-- farmer_id: ForeignKey(farmers.id)
-- soil_type: String (Black Cotton, Alluvial, Red, Sandy Loam)
-- ph_level: Float
-- electrical_conductivity: Float
-- organic_carbon_pct: Float
-- nitrogen_n_kg_ha: Float
-- phosphorus_p_kg_ha: Float
-- potassium_k_kg_ha: Float
-- soil_health_card_number: String
-- verification_status: Enum (VERIFIED, UNVERIFIED, MISSING, NEEDS_CORRECTION)
+#### 1. Administrative & Organizational Hierarchy
+- **`districts`**: `id` (PK), `name` (String 100, Unique, Indexed), `state` (String 100), `created_at`.
+- **`divisions`**: `id` (PK), `name` (String 100, Indexed), `district_id` (FK -> `districts.id`), `created_at`. Unique constraint: `("district_id", "name")`.
+- **`factories`**: `id` (PK), `name` (String 150), `code` (String 50, Unique, Indexed), `division_id` (FK -> `divisions.id`), `phone_number`.
+- **`cdos`**: `id` (PK), `cdo_code` (String 50, Unique, Indexed), `name` (String 150), `phone_number` (String 20, Unique, Indexed), `email`, `factory_id` (FK -> `factories.id`), `division_id` (FK -> `divisions.id`), `is_active` (Boolean).
+- **`agronomists`**: `id` (PK), `name` (String 150), `phone_number` (String 20, Unique, Indexed), `email`, `specialization` (String 150), `is_active` (Boolean).
 
-Table: cdo_directory
-- id: UUID / Integer (Primary Key)
-- cdo_code: String (Unique)
-- name: String
-- phone_number: String (Unique)
-- email: String
-- factory_name: String
-- division: String
-- active: Boolean
+#### 2. Farmer Master & Contact Layer
+- **`farmers`**:
+  - `id`: Integer PK
+  - `farmer_id`: String(50), Unique, Indexed (e.g. `FARM-00001`)
+  - `full_name`: String(150), Indexed
+  - `primary_phone`: String(20), Unique, Indexed (10-digit normalized)
+  - `alternate_phone`: String(20), Nullable
+  - `village`, `tehsil`: String(100)
+  - `district_id` (FK -> `districts.id`), `division_id` (FK -> `divisions.id`), `factory_id` (FK -> `factories.id`), `assigned_cdo_id` (FK -> `cdos.id`)
+  - `preferred_language`: String(20), default `'mr'`
+  - Field Statuses: `name_status`, `village_status`, `tehsil_status` (Enum: `VERIFIED`, `UNVERIFIED`, `MISSING`, `NEEDS_CORRECTION`)
+  - Provenance: `data_source`, `supplied_by`, `created_at`, `last_updated_at`, `verified_at`, `verified_by`.
+- **`farmer_contacts`**: `id` (PK), `farmer_id` (FK -> `farmers.id`, Cascade Delete), `contact_name`, `phone_number` (Indexed), `relationship_type` (Self, Son, Brother, CDO), `is_primary`, `notes`.
 
-Table: agronomist_directory
-- id: UUID / Integer (Primary Key)
-- name: String
-- phone_number: String
-- specialization: String (Sugarcane Pathology, Soil Fertility, Entomology)
-- active: Boolean
+#### 3. Multi-Plot Agricultural Holdings, Crops & Soils
+- **`farm_plots`**:
+  - `id`: Integer PK
+  - `farmer_id`: FK -> `farmers.id`, Indexed (Cascade Delete)
+  - `plot_identifier`: String(50), e.g. `PLOT-1`, `GAT-142`
+  - `land_area`: Float, `area_unit` (Enum: `ACRES`, `GUNTHAS`, `HECTARES`)
+  - `has_drip_irrigation`: Boolean
+  - `water_source`: String (Well, Borewell, Canal, River)
+  - Statuses: `area_status`, `irrigation_status`
+  - Unique constraint: `("farmer_id", "plot_identifier")`.
+- **`crop_records`**:
+  - `id`: Integer PK
+  - `farm_plot_id`: FK -> `farm_plots.id`, Indexed (Cascade Delete)
+  - `crop_name`: String(100), Indexed (Sugarcane, Onion, Cotton, Wheat, etc.)
+  - `crop_variety`: String(100) (Co 86032, CoM 0265, Phule Samarth)
+  - `planting_date`: Date, Nullable
+  - `planting_season`: Enum (`SURU`, `ADSALI`, `PRE_SEASONAL`, `KHARIF`, `RABI`, `SUMMER`, `OTHER`)
+  - `growth_stage`: String(100)
+  - `is_current`: Boolean
+  - Statuses: `crop_status`, `variety_status`, `planting_date_status`, `season_status`, `stage_status`.
+- **`soil_profiles`**:
+  - `id`: Integer PK
+  - `farm_plot_id`: FK -> `farm_plots.id`, Indexed (Cascade Delete)
+  - `soil_type`: String(100) (Black Cotton, Medium Black, Clay Loam)
+  - `soil_fertility`: String(100) (Low, Medium, High)
+  - `ph_level`: Float, `ec_level`: Float, `organic_carbon_pct`: Float
+  - `nitrogen_n_kg_ha`: Float, `phosphorus_p_kg_ha`: Float, `potassium_k_kg_ha`: Float
+  - `soil_health_card_number`: String(100)
+  - Statuses: `soil_type_status`, `fertility_status`, `npk_status`.
 
-Table: conversation_sessions
-- id: UUID / Integer (Primary Key)
-- farmer_phone: String (Indexed)
-- current_state: String (AWAITING_QUERY, COLLECTING_INFO, AWAITING_CLARIFICATION)
-- pending_fields: JSON (List of missing fields currently being pursued)
-- last_interaction: DateTime
+#### 4. Coordination, Conversation Sessions, Tasks & Deduplication
+- **`conversation_sessions`**: `id` (PK), `session_id` (Unique, Indexed), `farmer_id` (FK -> `farmers.id`), `phone_number` (Indexed), `current_state`, `pending_fields` (Text/JSON), `context_data` (Text/JSON), `last_interaction_at`.
+- **`issues`**: `id` (PK), `issue_code` (Unique, Indexed, e.g. `ISS-202611-0001`), `farmer_id` (FK), `farm_plot_id` (FK), `category`, `priority` (Enum: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), `status` (Enum: `OPEN`, `INVESTIGATING`, `ESCALATED_CDO`, `ESCALATED_AGRONOMIST`, `RESOLVED`, `CLOSED`), `title`, `description`, `media_urls`, `assigned_cdo_id` (FK), `assigned_agronomist_id` (FK), `resolution_notes`, `resolved_at`.
+- **`follow_up_tasks`**: `id` (PK), `task_code` (Unique, Indexed), `issue_id` (FK), `target_role` (Enum: `FARMER`, `CDO`, `AGRONOMIST`), `target_phone`, `description`, `due_date`, `status` (Enum: `PENDING`, `IN_PROGRESS`, `COMPLETED`, `OVERDUE`, `CANCELLED`), `reminder_count`, `last_reminder_at`.
+- **`audit_logs`**: `id` (PK), `log_id` (Unique, Indexed), `timestamp` (Indexed), `sender_name`, `sender_phone` (Indexed), `district`, `group_id`, `group_name`, `incoming_text`, `category` (Indexed), `action`, `bot_reply`, `rag_sources` (Text/JSON), `processing_time_ms`, `is_escalated`, `resolved`.
+- **`webhook_events`**: `id` (PK), `message_id` (Unique, Indexed), `sender_phone` (Indexed), `event_type`, `payload_hash`, `status` (Enum: `RECEIVED`, `PROCESSING`, `COMPLETED`, `FAILED`, `DUPLICATE`), `retry_count`, `error_message`, `created_at`, `completed_at`.
 
-Table: issues
-- id: String (Primary Key, e.g. "ISS-202611-0042")
-- farmer_id: ForeignKey(farmers.id)
-- category: String (Disease, Nutrient, Irrigation, Scheme, Administrative)
-- priority: Enum (LOW, MEDIUM, HIGH, CRITICAL)
-- status: Enum (NEW, AWAITING_FARMER, AWAITING_CDO, ASSIGNED_AGRONOMIST, IN_PROGRESS, RESOLVED, CLOSED)
-- description: Text
-- media_urls: JSON
-- assigned_cdo_id: ForeignKey(cdos.id, Nullable)
-- assigned_agronomist_id: ForeignKey(agronomists.id, Nullable)
-- resolution_notes: Text
-- created_at: DateTime
-- resolved_at: DateTime
+### 4.3 Clean Repository & Service Architecture
 
-Table: audit_logs
-- id: UUID / Integer (Primary Key)
-- timestamp: DateTime (Indexed)
-- sender_phone: String
-- direction: Enum (INBOUND, OUTBOUND)
-- category: String
-- action_taken: String
-- rag_sources_used: JSON
-- processing_time_ms: Float
-- is_escalated: Boolean
-- resolved: Boolean
+The system enforces a clean separation of concerns:
+```
+           +---------------------------------------+
+           |     FastAPI Gateway & Farmer Agent    |
+           +-------------------+-------------------+
+                               |
+                               v
+           +---------------------------------------+
+           |             Service Layer             |
+           |  - FarmerService                      |
+           |  - DeduplicationService               |
+           |  - ExcelMigrationService              |
+           +-------------------+-------------------+
+                               |
+                               v
+           +---------------------------------------+
+           |           Repository Layer            |
+           |  - FarmerRepository                   |
+           |  - CDORepository                      |
+           |  - IssueRepository                    |
+           |  - AuditRepository                    |
+           |  - IdempotencyRepository              |
+           +-------------------+-------------------+
+                               |
+                               v
+           +---------------------------------------+
+           |     SQLAlchemy 2.0 ORM & SQLite/PG     |
+           +---------------------------------------+
 ```

@@ -149,3 +149,56 @@ During Phase 1 stabilization, incoming webhook events from Meta WhatsApp Cloud A
 
 ### Rationale
 - Ensures 100% gateway uptime, eliminates duplicate outbound WhatsApp messages, and satisfies security/PII requirements.
+
+---
+
+## ADR-009: Normalized Multi-Plot Relational Schema with Data Provenance and Verification Lifecycle
+
+### Context
+A farmer may own multiple land parcels in different locations, each with distinct crops, planting dates, acreage, irrigation infrastructure, and soil health profiles. Storing these in a single denormalized table or flatfile spreadsheet causes severe data duplication, overwrite anomalies, and prevents tracking which data points are scientifically verified vs farmer-reported.
+
+### Decision
+In Phase 2, we separated:
+1. `Farmer` (Master personal and contact record with stable business ID `FARM-XXXXX` and primary 10-digit phone).
+2. `FarmerContact` (Alternate numbers, sons, brothers, and shared device tracking).
+3. `FarmPlot` (Distinct geographic land parcels with area, unit, drip status, and water source).
+4. `CropRecord` (1-to-many cultivation history per plot with planting dates and Indian planting seasons: `SURU`, `ADSALI`, `PRE_SEASONAL`, `KHARIF`, `RABI`).
+5. `SoilProfile` (1-to-many chemical profiles per plot with NPK in kg/ha, pH, EC, and Soil Health Card tracking).
+
+Every significant agronomic field is coupled with a `VerificationStatus` (`VERIFIED`, `UNVERIFIED`, `MISSING`, `NEEDS_CORRECTION`) and provenance metadata (`data_source`, `supplied_by`, `created_at`, `last_updated_at`, `verified_at`, `verified_by`). Unsupplied fields are left `None` or marked `MISSING`; no synthetic defaults are ever fabricated.
+
+### Rationale
+- Satisfies Mandatory Rules: Multi-plot land support, zero fabrication of missing data, and persistent tracking of verified agronomic facts.
+
+---
+
+## ADR-010: Persistent Webhook Deduplication and Idempotency Architecture
+
+### Context
+Meta WhatsApp Cloud API implements retry semantics when a webhook server takes longer than 20 seconds to respond or when network blips occur. In Phase 1, deduplication relied on an in-memory `deque(maxlen=1000)` in `gateway/webhook_server.py`. If the server restarted, this deque cleared, risking duplicate query processing and spamming farmer WhatsApp groups with duplicate outbound messages.
+
+### Decision
+In Phase 2, we implemented persistent, database-backed idempotency using the `webhook_events` table and a hybrid `DeduplicationService`:
+1. **Thread-Safe RAM Cache:** A bounded deque and set guarded by `threading.Lock()` provides <0.1ms ingress rejection for immediate duplicates.
+2. **Persistent DB Ledger:** An atomic transaction attempts to claim the `message_id` with status `PROCESSING`. A database-level unique constraint on `message_id` guarantees that concurrent or post-restart retries are rejected.
+3. **Lifecycle Tracking:** Messages are transitioned to `COMPLETED` upon successful WhatsApp dispatch or `FAILED` with error text on exception.
+
+### Rationale
+- Guarantees exactly-once processing across server reboots and concurrent multi-threaded requests.
+
+---
+
+## ADR-011: Safe, Idempotent Excel Ingestion with Mandatory Timestamped Backup Strategy
+
+### Context
+Existing farmer profiles were stored in `data/farmer_profiles.xlsx`. Migrating to a relational database carries risks of data corruption, accidental deletion, or race conditions if external processes still reference the spreadsheet.
+
+### Decision
+We engineered `ExcelMigrationService` with the following guarantees:
+1. **Mandatory Backup:** Before reading or touching data, an immutable timestamped copy is created in `data/backups/farmer_profiles_backup_YYYYMMDD_HHMMSS.xlsx`.
+2. **Full Idempotency:** The migration matches farmers by normalized 10-digit primary phone. Re-running the migration updates existing records and creates zero duplicate rows.
+3. **Two-Way Compatibility:** `form_automation/excel_manager.py` was refactored to read and write through `FarmerService` while maintaining the Excel sheet, ensuring that legacy endpoints (`/api/farmers`, `/api/form-submission`) continue operating without breakage.
+4. **Export Capability:** Provides a full reverse export method to generate an Excel sheet matching the legacy format directly from the database.
+
+### Rationale
+- Prevents data loss, provides auditability, and preserves backward compatibility without breaking existing workflows.

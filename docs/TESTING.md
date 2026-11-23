@@ -175,3 +175,39 @@ Tested live Uvicorn startup and HTTP binding on `http://127.0.0.1:8000/`:
 ### 5.4 Canonical Documentation Location
 - Canonical documentation is exclusively located within the Git repository at `ADT-AI-BOT/docs/`.
 - Misplaced and duplicate documentation in the root workspace has been resolved by placing a pointer README in `docs/` directing all readers to the canonical `ADT-AI-BOT/docs/` directory.
+
+---
+
+## 6. Phase 2 Empirical Test Results: Database & Farmer Information Management
+
+### 6.1 Test Suite Overview (`scripts/test_phase_2_database.py`)
+- **Execution Command:** `python scripts/test_phase_2_database.py`
+- **Total Tests Executed:** 62
+- **Pass Rate:** **62/62 PASSED (100.0%)**
+- **Test Database Engine:** In-memory SQLite (`sqlite:///:memory:`) using isolated fixtures to prevent modifying production or sample data.
+
+### 6.2 Test Results by Functional Domain
+
+| Section | Domain Tested | Test Count | Pass Rate | Key Verifications |
+|---|---|---|---|---|
+| **Section 1** | Database Initialization & Schema | 2 | 2/2 (100%) | Verified DB connectivity check; confirmed all 15 relational tables created. |
+| **Section 2** | Geographic Hierarchy & CDO Directory | 7 | 7/7 (100%) | Verified District, Division, Factory, CDO creation, employee code lookup, and agronomist specialization index. |
+| **Section 3** | Farmer CRUD & Phone Lookups | 7 | 7/7 (100%) | Verified farmer creation, 10-digit clean lookup, `+91` E.164 normalization, stable `farmer_id` lookup, unknown phone returns `None`. |
+| **Section 4** | Multi-Plot Holdings, Crops & Soils | 7 | 7/7 (100%) | Verified multiple plots attached to 1 farmer; verified Indian seasons (`RABI`, `SURU`); verified NPK tracking in kg/ha; confirmed missing fields are flagged `MISSING` (zero fabrication). |
+| **Section 5** | Verification Status & Provenance | 5 | 5/5 (100%) | Verified 4 lifecycle states (`VERIFIED`, `UNVERIFIED`, `MISSING`, `NEEDS_CORRECTION`); confirmed data source and timestamps stored. |
+| **Section 6** | Shared & Alternate Phone Numbers | 2 | 2/2 (100%) | Verified alternate contact resolution; confirmed duplicate primary phones are rejected by unique constraints. |
+| **Section 7** | Issue Lifecycle & Tasks | 5 | 5/5 (100%) | Verified issue code generation (`ISS-YYYYMM-XXXX`), escalation to CDO, follow-up task generation, resolution with audit notes. |
+| **Section 8** | Persistent Audit Logging | 4 | 4/4 (100%) | Verified DB write of audit logs; confirmed statistics calculation; verified escalation tracking across restarts. |
+| **Section 9** | Persistent Webhook Deduplication | 6 | 6/6 (100%) | Verified first claim succeeds; duplicate claim rejected; completed and failed states tracked; multi-threaded concurrent duplicate rejected (thread safety verified). |
+| **Section 10** | Excel Migration & Idempotency | 5 | 5/5 (100%) | Verified timestamped backup created in `data/backups/`; first run imports valid & skips invalid; re-run updates without duplicates; export round-trip preserves format. |
+| **Section 11** | FarmerService Compatibility | 4 | 4/4 (100%) | Verified `FarmerProfile` and `FarmerFormSubmission` model conversion from database layer. |
+| **Section 12** | Webhook Regression Tests | 8 | 8/8 (100%) | Verified Meta handshake, text message processing, 400 Bad Request on malformed JSON, media skip, health endpoints. |
+
+### 6.3 Regression Suites Verification (Zero Regressions)
+
+| Test Script | Status | Results |
+|---|---|---|
+| `scripts/test_retrieval.py` | ✅ **PASSED** | 12/12 Rank 1 hits (100.0%) across English, Hindi, and Hinglish queries. |
+| `scripts/test_phase_b.py` | ✅ **PASSED** | 16/16 classifier rules + 5/5 agent end-to-end scenarios (100.0%). |
+| `scripts/test_webhook_flow.py` | ✅ **PASSED** | 8/8 steps including all 6 resilience edge cases (100.0%). |
+| `scripts/test_phase_2_database.py` | ✅ **PASSED** | 62/62 database, repository, multi-plot, and deduplication tests (100.0%). |

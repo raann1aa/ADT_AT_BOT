@@ -71,9 +71,11 @@ class ExcelMigrationService:
         total_scanned = len(df)
         created_count = 0
         updated_count = 0
+        unchanged_count = 0
         skipped_count = 0
         error_count = 0
         errors = []
+        seen_batch_phones = set()
 
         logger.info(f"Starting Excel migration for {total_scanned} records from {self.excel_path}...")
 
@@ -91,6 +93,19 @@ class ExcelMigrationService:
                         skipped_count += 1
                         logger.warning(f"Row {row_idx}: Invalid phone '{raw_phone}'. Skipping.")
                         continue
+
+                    # Shared Phone Guard: Detect duplicate phone within the same Excel spreadsheet
+                    if clean_phone in seen_batch_phones:
+                        msg = (
+                            f"Row {row_idx}: Duplicate phone {clean_phone} detected in Excel sheet. "
+                            f"An earlier row already registered/updated this number. "
+                            f"Skipping row to prevent accidental overwriting/merging of shared household members."
+                        )
+                        logger.warning(msg)
+                        errors.append(msg)
+                        skipped_count += 1
+                        continue
+                    seen_batch_phones.add(clean_phone)
 
                     # Extract fields with safe defaults
                     raw_name = str(row.get("Farmer Name", "")).strip()
@@ -138,26 +153,58 @@ class ExcelMigrationService:
                     existing_farmer = farmer_repo.lookup_by_phone(clean_phone)
 
                     if existing_farmer:
-                        # Update existing farmer
-                        existing_farmer.full_name = farmer_name
-                        existing_farmer.district_id = district.id
-                        if tehsil_name:
-                            existing_farmer.tehsil = tehsil_name
-                        existing_farmer.data_source = "EXCEL_MIGRATION"
-                        existing_farmer.last_updated_at = datetime.now()
+                        # Conflict Resolution & Change Detection
+                        has_changes = False
 
-                        # Update or create plot
+                        # 1. Farmer Name (Preserve VERIFIED status)
+                        if existing_farmer.name_status != VerificationStatus.VERIFIED:
+                            if existing_farmer.full_name != farmer_name:
+                                existing_farmer.full_name = farmer_name
+                                has_changes = True
+                        else:
+                            logger.info(f"Row {row_idx}: Name for {existing_farmer.farmer_id} is VERIFIED; preserving DB value '{existing_farmer.full_name}'.")
+
+                        # 2. District
+                        if existing_farmer.district_id != district.id:
+                            existing_farmer.district_id = district.id
+                            has_changes = True
+
+                        # 3. Tehsil
+                        if tehsil_name and existing_farmer.tehsil != tehsil_name:
+                            if existing_farmer.tehsil_status != VerificationStatus.VERIFIED:
+                                existing_farmer.tehsil = tehsil_name
+                                has_changes = True
+
+                        # 4. Plots and Crops
                         if existing_farmer.plots:
                             plot = existing_farmer.plots[0]
-                            plot.land_area = farm_size
-                            plot.has_drip_irrigation = has_drip
-                            plot.last_updated_at = datetime.now()
 
+                            # Land Area (Preserve VERIFIED status)
+                            if plot.area_status != VerificationStatus.VERIFIED:
+                                if abs(plot.land_area - farm_size) > 0.01:
+                                    plot.land_area = farm_size
+                                    plot.last_updated_at = datetime.now()
+                                    has_changes = True
+                            else:
+                                logger.info(f"Row {row_idx}: Land area for {existing_farmer.farmer_id} is VERIFIED; preserving DB value {plot.land_area}.")
+
+                            # Drip irrigation
+                            if plot.has_drip_irrigation != has_drip:
+                                plot.has_drip_irrigation = has_drip
+                                plot.last_updated_at = datetime.now()
+                                has_changes = True
+
+                            # Crop Record (Preserve VERIFIED status)
                             if plot.crops:
                                 crop = plot.crops[0]
-                                crop.crop_name = crop_name
-                                crop.growth_stage = growth_stage
-                                crop.last_updated_at = datetime.now()
+                                if crop.crop_status != VerificationStatus.VERIFIED:
+                                    if crop.crop_name != crop_name or crop.growth_stage != growth_stage:
+                                        crop.crop_name = crop_name
+                                        crop.growth_stage = growth_stage
+                                        crop.last_updated_at = datetime.now()
+                                        has_changes = True
+                                else:
+                                    logger.info(f"Row {row_idx}: Crop for {existing_farmer.farmer_id} is VERIFIED; preserving DB value '{crop.crop_name}'.")
                             else:
                                 farmer_repo.add_crop_to_plot(
                                     farm_plot_id=plot.id,
@@ -166,11 +213,18 @@ class ExcelMigrationService:
                                     crop_status=VerificationStatus.UNVERIFIED,
                                     data_source="EXCEL_MIGRATION"
                                 )
+                                has_changes = True
 
+                            # Soil Profile (Preserve VERIFIED status)
                             if plot.soil_profiles:
                                 soil = plot.soil_profiles[0]
-                                soil.soil_type = soil_name
-                                soil.last_updated_at = datetime.now()
+                                if soil.soil_type_status != VerificationStatus.VERIFIED:
+                                    if soil.soil_type != soil_name:
+                                        soil.soil_type = soil_name
+                                        soil.last_updated_at = datetime.now()
+                                        has_changes = True
+                                else:
+                                    logger.info(f"Row {row_idx}: Soil for {existing_farmer.farmer_id} is VERIFIED; preserving DB value '{soil.soil_type}'.")
                             else:
                                 farmer_repo.add_soil_profile(
                                     farm_plot_id=plot.id,
@@ -178,6 +232,7 @@ class ExcelMigrationService:
                                     soil_type_status=VerificationStatus.UNVERIFIED,
                                     data_source="EXCEL_MIGRATION"
                                 )
+                                has_changes = True
                         else:
                             plot = farmer_repo.add_plot(
                                 farmer_id=existing_farmer.id,
@@ -201,6 +256,13 @@ class ExcelMigrationService:
                                 soil_type_status=VerificationStatus.UNVERIFIED,
                                 data_source="EXCEL_MIGRATION"
                             )
+                            has_changes = True
+
+                        if has_changes:
+                            existing_farmer.data_source = "EXCEL_MIGRATION"
+                            existing_farmer.last_updated_at = datetime.now()
+                        else:
+                            unchanged_count += 1
 
                         updated_count += 1
 
@@ -273,6 +335,7 @@ class ExcelMigrationService:
             "total_scanned": total_scanned,
             "created_count": created_count,
             "updated_count": updated_count,
+            "unchanged_count": unchanged_count,
             "skipped_count": skipped_count,
             "error_count": error_count,
             "errors": errors

@@ -90,15 +90,28 @@ Phase 2 has successfully evolved the flatfile/in-memory data layer of ADT-AI-BOT
 
 ## 4. Known Operational Realities & Phase 2 Boundaries
 
-1. **Database Dialects:** Local development and automated testing use SQLite; PostgreSQL is the intended production engine configured via `DATABASE_URL`. SQLite test passing does not by itself establish production PostgreSQL scale readiness.
+1. **Database Dialects:** Local development and automated testing use SQLite; PostgreSQL is the intended production engine configured via `DATABASE_URL`. SQLite test passing does not by itself establish production PostgreSQL scale readiness. Row-level locks (`SELECT FOR UPDATE`) and connection pool tuning must be validated in staging.
 2. **Stateless Conversational Flow:** Messages are still handled without multi-turn conversational memory or missing field elicitation (Scope of Phase 3).
 3. **Coarse Message Classification:** 5 basic regex categories; needs expansion to 13 granular agricultural intents (Scope of Phase 3).
 4. **Multilingual Processing:** Native Marathi agricultural NLU and speech transcription are scheduled for Phase 4.
 5. **WhatsApp API Limitations:** Official Meta Cloud API strictly supports 1-to-1 messaging. Group simulation remains an offline test fixture only.
+6. **Transactional Outbox Requirement:** Inline HTTP calls to Meta WhatsApp Cloud API lack a Transactional Outbox pattern. If network times out after Meta delivers the message, a retry will re-send an outbound message. A dedicated `outbox_messages` table is scheduled for Phase 3/4.
+7. **Temporal History Tracking:** Updating fields overwrites existing column values in place. A dedicated `field_history` changelog table is recommended for Phase 3.
 
 ---
 
-## 5. Scope & Instructions for Phase 3: Central AI Agent & Conversation Automation
+## 5. Phase 2 Final Data Integrity Audit Verification Summary
+
+A rigorous audit (`scripts/audit_phase_2_integrity.py`) empirically tested 5 critical integrity domains:
+- **Excel Overwrite Protection:** Verified that database fields with `VerificationStatus.VERIFIED` are never overwritten by unverified Excel data.
+- **In-Batch Duplicate Phone Guard:** Rows in Excel sharing the same phone number are flagged and skipped rather than destructively merging different family members.
+- **Webhook Crash Recovery:** Enhanced `IdempotencyRepository` with stale lock reclamation (`stale_threshold_seconds`) and explicit retry support for failed events.
+- **Multi-Farmer Disambiguation:** Added `FarmerRepository.lookup_all_by_phone(phone)` to return all matching farmer records rather than arbitrarily taking `.first()`.
+- **Field Status Isolation:** Confirmed updating one field's verification status leaves all other field statuses completely untouched.
+
+---
+
+## 6. Scope & Instructions for Phase 3: Central AI Agent & Conversation Automation
 
 ### Objective of Phase 3
 Implement a stateful, multi-turn Conversational AI Orchestrator that detects missing agronomic parameters, dynamically asks gentle follow-up questions, and expands message classification to 13 granular agricultural intents.
@@ -118,10 +131,10 @@ Implement a stateful, multi-turn Conversational AI Orchestrator that detects mis
 
 ---
 
-## 6. Explicit Stop Instruction
+## 7. Explicit Stop Instruction
 
 In strict adherence to the project instructions:
-- **Phase 2 is complete.**
-- **All code and canonical documentation have been updated and verified.**
+- **Phase 2 and its Final Data Integrity Audit are complete.**
+- **All code, tests, and canonical documentation have been updated, committed, and pushed.**
 - **Do not execute Phase 3 automatically.**
 - **Await user review and explicit approval before starting Phase 3.**

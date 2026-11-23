@@ -202,3 +202,36 @@ We engineered `ExcelMigrationService` with the following guarantees:
 
 ### Rationale
 - Prevents data loss, provides auditability, and preserves backward compatibility without breaking existing workflows.
+
+---
+
+## ADR-012: Data Integrity, Conflict Resolution, and Recovery Architecture (Phase 2 Final Audit)
+
+### Context
+Following Phase 2 implementation, a rigorous empirical data integrity audit tested five critical areas:
+1. Excel migration overwrite risks and unnecessary rewrite tracking.
+2. Webhook exactly-once processing, worker crashes during `PROCESSING`, and external WhatsApp dispatch coupling.
+3. Farmer identity, unique constraints, and shared mobile numbers in rural households.
+4. Field-level verification isolation versus temporal history preservation.
+5. PostgreSQL compatibility and staging requirements.
+
+### Decisions & Safeguards Implemented
+
+1. **Excel Conflict Resolution Strategy & Change Detection:**
+   - **Protection of Verified Data:** If a database attribute has `VerificationStatus.VERIFIED` (e.g., confirmed by CDO or land revenue records), `ExcelMigrationService` will NEVER overwrite it with unverified Excel spreadsheet values.
+   - **Change Detection:** `ExcelMigrationService` compares incoming values with existing values. It only bumps `last_updated_at` when values genuinely differ, tracking both `updated_count` and `unchanged_count`.
+   - **In-Batch Duplicate Phone Guard:** If two rows in the same Excel spreadsheet share a phone number, the service flags a warning and refuses to overwrite the first row with the second row, preventing destructive household merges.
+
+2. **Webhook Recovery & Transaction Boundary:**
+   - **Stale Processing Reclamation:** `IdempotencyRepository.claim_message` was enhanced with `stale_threshold_seconds` support to reclaim messages orphaned in `PROCESSING` status if a worker crashed.
+   - **Explicit Failed Retry:** Added `allow_failed_retry` capability for controlled re-dispatch.
+   - **Outbox Pattern Recommendation:** Identified that outbound WhatsApp API calls (`WhatsAppCloudClient.send_message`) must be decoupled via a Transactional Outbox table in Phase 3 to eliminate duplicate delivery risks if DB commits fail after successful HTTP transport.
+
+3. **Multi-Farmer Disambiguation:**
+   - Added `FarmerRepository.lookup_all_by_phone(phone)` returning a list of all farmers sharing a primary or alternate contact, eliminating arbitrary `.first()` resolution.
+
+4. **Field-Level Isolation:**
+   - Verified that field verification statuses (`name_status`, `area_status`, `planting_date_status`, `crop_status`, `soil_type_status`) are strictly isolated. Updating one field never alters the verification state of another.
+
+### Rationale
+- Protects verified agronomic truth from legacy data pollution while providing clean recovery paths for distributed messaging.

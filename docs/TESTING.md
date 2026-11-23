@@ -211,3 +211,28 @@ Tested live Uvicorn startup and HTTP binding on `http://127.0.0.1:8000/`:
 | `scripts/test_phase_b.py` | ✅ **PASSED** | 16/16 classifier rules + 5/5 agent end-to-end scenarios (100.0%). |
 | `scripts/test_webhook_flow.py` | ✅ **PASSED** | 8/8 steps including all 6 resilience edge cases (100.0%). |
 | `scripts/test_phase_2_database.py` | ✅ **PASSED** | 62/62 database, repository, multi-plot, and deduplication tests (100.0%). |
+
+---
+
+## 7. Phase 2 Final Data Integrity & Reliability Audit Results
+
+### 7.1 Audit Script Overview (`scripts/audit_phase_2_integrity.py`)
+- **Execution Command:** `python scripts/audit_phase_2_integrity.py`
+- **Execution Status:** Successfully executed against synthetic data fixtures.
+- **Audit Findings & Safeguard Summary:**
+
+| Audit Dimension | Test Scenario | Observed Implementation Behavior | Mitigation / Safeguard Applied |
+|---|---|---|---|
+| **Excel Migration Safety** | Unchanged record re-run | `updated_count` reported 1 because row was touched; `last_updated_at` was bumped | Added change detection: `last_updated_at` bumped only if values changed; reports `unchanged_count` |
+| **Excel Migration Safety** | DB field verified, Excel unverified | Migration blindly overwrote verified DB value (`Sugarcane`) with stale Excel value (`Wheat`) | Added **Conflict Resolution Rule 1**: If field status is `VERIFIED`, Excel migration NEVER overwrites it |
+| **Excel Migration Safety** | Multiple farmers sharing phone in Excel | Row 2 silently overwrote Row 1, merging two brothers into one profile | Added **In-Batch Duplicate Guard**: detects duplicate phone in Excel batch, flags warning, skips destructive merge |
+| **Excel Migration Safety** | Farmer phone changes in Excel | Migration could not match by phone and created duplicate `FARM-00003` | Documented requirement for stable Farmer ID in future spreadsheets; phone changes require admin/CDO workflow |
+| **Webhook Exactly-Once** | Concurrent worker claim | Thread-safe in-memory lock + DB unique constraint: `[True, False]` | Exactly-once claim guaranteed under concurrent race conditions |
+| **Webhook Exactly-Once** | Server restart dedup | RAM cache cleared; DB ledger rejected duplicate `wamid.xxx` | Persistent ledger survives server reboots |
+| **Webhook Recovery** | Worker crash during `PROCESSING` | Status remained `PROCESSING`; Meta retry dropped without processing | Added `stale_threshold_seconds` to `IdempotencyRepository` to reclaim crashed locks |
+| **Webhook Recovery** | Outbound WhatsApp vs DB coupling | External HTTP dispatch happens inline; failure between HTTP and DB risks retry spam | Documented architectural requirement for **Transactional Outbox Pattern** in Phase 3 |
+| **Farmer Identity** | Two farmers with same primary phone | SQLite/PostgreSQL unique constraint raises `IntegrityError` | Enforces 1 primary phone per farmer; shared family phones must use `FarmerContact` |
+| **Farmer Identity** | Multi-farmer lookup by shared phone | `lookup_by_phone` used `.first()`, arbitrarily picking the first farmer | Added `lookup_all_by_phone(phone)` returning full list of matching farmers for disambiguation |
+| **Field Verification** | Updating one field's status | Updating `planting_date` status to `VERIFIED` left `name_status` and `area_status` unchanged | Confirmed field-level verification isolation |
+| **Provenance & History** | Preserving previous field values | In-place updates overwrite previous column values | Confirmed absence of temporal table; recommended dedicated `field_history` table for Phase 3 |
+| **PostgreSQL Compatibility** | Enums, FKs, pooling, migrations | Portable VARCHAR enums (`native_enum=False`), `QueuePool` for Postgres, batch migrations | Compatible schema; row-level locking (`SELECT FOR UPDATE`) requires staging verification |

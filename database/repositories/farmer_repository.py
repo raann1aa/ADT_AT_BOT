@@ -110,6 +110,53 @@ class FarmerRepository:
 
         return None
 
+    def lookup_all_by_phone(self, raw_phone: str) -> List[Farmer]:
+        """
+        Looks up ALL registered farmers associated with a mobile number.
+        Returns a list of Farmer entities, allowing multi-farmer households
+        (e.g., father and son sharing a phone) to be disambiguated safely
+        without arbitrary .first() truncation.
+        """
+        clean_phone = self.normalize_phone(raw_phone)
+        if not clean_phone:
+            return []
+
+        results = []
+        seen_ids = set()
+
+        # 1. Primary phone match
+        stmt = (
+            select(Farmer)
+            .options(
+                joinedload(Farmer.district),
+                joinedload(Farmer.division),
+                joinedload(Farmer.factory),
+                joinedload(Farmer.assigned_cdo),
+                selectinload(Farmer.contacts),
+                selectinload(Farmer.plots).selectinload(FarmPlot.crops),
+                selectinload(Farmer.plots).selectinload(FarmPlot.soil_profiles),
+            )
+            .where(Farmer.primary_phone == clean_phone)
+        )
+        for farmer in self.session.scalars(stmt).all():
+            if farmer.id not in seen_ids:
+                results.append(farmer)
+                seen_ids.add(farmer.id)
+
+        # 2. Alternate contacts match
+        contact_stmt = (
+            select(FarmerContact)
+            .where(FarmerContact.phone_number == clean_phone)
+        )
+        for contact in self.session.scalars(contact_stmt).all():
+            if contact.farmer_id and contact.farmer_id not in seen_ids:
+                farmer = self.get_by_id(contact.farmer_id)
+                if farmer:
+                    results.append(farmer)
+                    seen_ids.add(farmer.id)
+
+        return results
+
     def create_farmer(
         self,
         farmer_id: str,

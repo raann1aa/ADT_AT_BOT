@@ -29,13 +29,15 @@ class IdempotencyRepository:
         message_id: str,
         sender_phone: str,
         event_type: str = "message",
-        payload_hash: Optional[str] = None
+        payload_hash: Optional[str] = None,
+        stale_threshold_seconds: Optional[int] = None,
+        allow_failed_retry: bool = False
     ) -> bool:
         """
         Attempts to claim an incoming webhook message ID.
         Returns:
-            True if the message is new and successfully claimed for processing.
-            False if the message ID already exists (duplicate delivery).
+            True if the message is new (or eligible for crash recovery) and claimed for processing.
+            False if the message ID already exists and is active/completed (duplicate delivery).
         """
         if not message_id:
             return False
@@ -44,6 +46,30 @@ class IdempotencyRepository:
         stmt = select(WebhookEvent).where(WebhookEvent.message_id == message_id)
         existing = self.session.scalars(stmt).first()
         if existing:
+            # Recovery Check 1: Worker crashed while in PROCESSING status
+            if (
+                existing.status == WebhookEventStatus.PROCESSING
+                and stale_threshold_seconds is not None
+            ):
+                age_seconds = (datetime.now() - existing.received_at).total_seconds()
+                if age_seconds > stale_threshold_seconds:
+                    logger.warning(
+                        f"Crash recovery: Reclaiming stale message {message_id} "
+                        f"(stuck in PROCESSING for {age_seconds:.1f}s > {stale_threshold_seconds}s)."
+                    )
+                    existing.received_at = datetime.now()
+                    self.session.flush()
+                    return True
+
+            # Recovery Check 2: Explicit retry of previously FAILED event
+            if existing.status == WebhookEventStatus.FAILED and allow_failed_retry:
+                logger.info(f"Retry allowed: Reclaiming FAILED message {message_id} for recovery.")
+                existing.status = WebhookEventStatus.PROCESSING
+                existing.error_message = None
+                existing.received_at = datetime.now()
+                self.session.flush()
+                return True
+
             logger.info(f"Persistent dedup: Message ID {message_id} already exists (status: {existing.status.value}).")
             return False
 

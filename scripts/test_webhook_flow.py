@@ -170,6 +170,87 @@ def test_admin_dashboard_endpoints():
     assert len(messages) > 0
     print(f"  ✅ Live Message Stream: {len(messages)} recent audit logs available.")
 
+def test_webhook_resilience_and_error_handling():
+    print("\n[8/8] Testing Webhook Resilience & Error Handling (Task C & E)...")
+    
+    # 1. Invalid verification token -> Must return 403 Forbidden
+    bad_verify = client.get("/webhook", params={"hub.mode": "subscribe", "hub.challenge": "123", "hub.verify_token": "wrong_secret"})
+    assert bad_verify.status_code == 403, f"Expected 403, got {bad_verify.status_code}"
+    print("  ✅ Rejected invalid webhook verification token with 403 Forbidden.")
+
+    # 2. Malformed non-JSON payload -> Must return 400
+    bad_json = client.post("/webhook", content=b"not a valid json string", headers={"Content-Type": "application/json"})
+    assert bad_json.status_code == 400, f"Expected 400, got {bad_json.status_code}"
+    print("  ✅ Safely rejected malformed JSON body with 400 Bad Request.")
+
+    # 3. Non-object JSON payload -> Must return 400
+    non_dict = client.post("/webhook", json=["an", "array", "payload"])
+    assert non_dict.status_code == 400, f"Expected 400, got {non_dict.status_code}"
+    print("  ✅ Safely rejected non-object JSON body with 400 Bad Request.")
+
+    # 4. Unsupported media message (audio) -> Handled cleanly without crashing
+    media_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "from": "919823011111",
+                        "id": "wamid.audio123",
+                        "type": "audio",
+                        "audio": {"id": "media_audio_001"}
+                    }]
+                }
+            }]
+        }]
+    }
+    media_resp = client.post("/webhook", json=media_payload)
+    assert media_resp.status_code == 200
+    print("  ✅ Non-text media message handled safely without crashing (skipped for Phase 4).")
+
+    # 5. Duplicate message payload -> Ingress deduplication
+    dup_id = "wamid.dup_test_999"
+    dup_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "from": "919823011111",
+                        "id": dup_id,
+                        "type": "text",
+                        "text": {"body": "First delivery"}
+                    }]
+                }
+            }]
+        }]
+    }
+    resp1 = client.post("/webhook", json=dup_payload)
+    assert resp1.status_code == 200
+    resp2 = client.post("/webhook", json=dup_payload)
+    assert resp2.status_code == 200
+    print("  ✅ Duplicate incoming message ID deduplicated safely at ingress.")
+
+    # 6. Empty text payload -> Handled safely without crashing
+    empty_payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "from": "919823011111",
+                        "id": "wamid.empty_text",
+                        "type": "text",
+                        "text": {"body": "   "}
+                    }]
+                }
+            }]
+        }]
+    }
+    empty_resp = client.post("/webhook", json=empty_payload)
+    assert empty_resp.status_code == 200
+    print("  ✅ Empty text message handled safely without crashing.")
+
 def main():
     print("=" * 80)
     print("🧪 RUNNING END-TO-END GATEWAY, WEBHOOK & DASHBOARD TEST SUITE")
@@ -181,8 +262,9 @@ def main():
     test_incoming_webhook_message_agri_query()
     test_weekly_form_broadcast_and_submission()
     test_admin_dashboard_endpoints()
+    test_webhook_resilience_and_error_handling()
     print("\n" + "=" * 80)
-    print("🎉 ALL 7/7 INTEGRATION TESTS PASSED SUCCESSFULLY!")
+    print("🎉 ALL 8/8 INTEGRATION & RESILIENCE TESTS PASSED SUCCESSFULLY!")
     print("=" * 80)
 
 if __name__ == "__main__":

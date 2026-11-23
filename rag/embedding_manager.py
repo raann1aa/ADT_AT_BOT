@@ -107,14 +107,37 @@ class LocalSentenceTransformerEmbedding(EmbeddingFunction):
     """
 
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2", local_files_only: bool = True):
-        self.model_name = model_name
+        self.model_name = os.environ.get("EMBEDDING_MODEL_PATH") or os.environ.get("EMBEDDING_MODEL_NAME") or model_name
         self.local_files_only = local_files_only
         self._model = None
 
     def _get_model(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name, local_files_only=self.local_files_only)
+            model_target = os.environ.get("EMBEDDING_MODEL_PATH") or self.model_name
+            offline_forced = os.environ.get("EMBEDDING_LOCAL_FILES_ONLY", "").lower() in ("1", "true", "yes")
+
+            # 1. Attempt local load first
+            try:
+                self._model = SentenceTransformer(model_target, local_files_only=True)
+                return self._model
+            except Exception as local_err:
+                if offline_forced:
+                    raise RuntimeError(
+                        f"Failed to load embedding model '{model_target}' from local cache: {local_err}. "
+                        "EMBEDDING_LOCAL_FILES_ONLY is enabled. Please pre-cache the model or configure EMBEDDING_MODEL_PATH."
+                    ) from local_err
+
+                # 2. Attempt online download if offline is not strictly forced
+                try:
+                    self._model = SentenceTransformer(model_target, local_files_only=False)
+                    return self._model
+                except Exception as dl_err:
+                    raise RuntimeError(
+                        f"Failed to load embedding model '{model_target}'. "
+                        f"Local cache check failed ({local_err}) and online download failed: {dl_err}. "
+                        "Please verify your internet connection or configure EMBEDDING_MODEL_PATH to a pre-cached model folder."
+                    ) from dl_err
         return self._model
 
     def __call__(self, input: Documents) -> Embeddings:

@@ -20,8 +20,14 @@ class RAGConfig:
     
     # Embedding Model Settings
     # Default is the locally cached sentence-transformers/all-MiniLM-L6-v2 model
-    embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    local_files_only: bool = True
+    embedding_model_name: str = field(
+        default_factory=lambda: os.environ.get("EMBEDDING_MODEL_PATH")
+        or os.environ.get("EMBEDDING_MODEL_NAME")
+        or "sentence-transformers/all-MiniLM-L6-v2"
+    )
+    local_files_only: bool = field(
+        default_factory=lambda: os.environ.get("EMBEDDING_LOCAL_FILES_ONLY", "true").lower() in ("1", "true", "yes")
+    )
     embedding_dimension: int = 384
     
     # Chunking Parameters

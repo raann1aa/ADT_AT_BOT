@@ -59,6 +59,12 @@ class WhatsAppCloudClient:
         }
 
         if self.is_live:
+            # Meta Cloud API strictly requires a valid recipient phone number
+            clean_digits = "".join(filter(str.isdigit, to))
+            if not clean_digits:
+                logger.warning(f"Invalid recipient for live Meta Cloud API: '{to}'. Individual API requires numeric phone.")
+                return {"status": "error", "code": 400, "detail": f"Invalid recipient for Cloud API: {to}"}
+
             url = f"{META_GRAPH_BASE_URL}/{self.phone_number_id}/messages"
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
@@ -67,7 +73,8 @@ class WhatsAppCloudClient:
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=10)
                 if response.status_code in (200, 201):
-                    logger.info(f"Delivered WhatsApp message to {to}")
+                    masked_to = f"******{clean_digits[-4:]}" if len(clean_digits) >= 4 else clean_digits
+                    logger.info(f"Delivered WhatsApp message to {masked_to}")
                     return {"status": "delivered", "data": response.json()}
                 else:
                     logger.error(f"WhatsApp Cloud API error {response.status_code}: {response.text}")

@@ -1,58 +1,63 @@
 """
-Excel Sync & Farmer Profile Manager.
-Syncs Google Form responses stored in Excel/Sheets, maintaining an instant
-phone-number-to-profile lookup for WhatsApp personalizations.
+Excel Sync & Farmer Profile Manager (Relational Database-Integrated).
+Syncs Google Form responses stored in Excel/Sheets with the relational database layer,
+maintaining an instant phone-number-to-profile lookup for WhatsApp personalizations.
 """
 
 from pathlib import Path
 from typing import Optional, Dict, List
+import logging
 import pandas as pd
 from .models import FarmerFormSubmission
+
+from database.connection import init_db
+
+logger = logging.getLogger("ExcelProfileManager")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_EXCEL_PATH = BASE_DIR / "data" / "farmer_profiles.xlsx"
 
+
 class ExcelProfileManager:
     """
-    Manages reading, caching, and updating farmer profiles in Excel.
-    Provides fast O(1) in-memory phone lookups for the WhatsApp agent.
+    Manages reading, caching, and updating farmer profiles.
+    Synchronizes between legacy Excel workbooks and the relational database,
+    providing fast O(1) in-memory phone lookups for the WhatsApp agent.
     """
 
     def __init__(self, excel_path: Optional[Path] = None):
         self.excel_path = Path(excel_path or DEFAULT_EXCEL_PATH)
         self.excel_path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: Dict[str, FarmerFormSubmission] = {}
+        # Lazy imports to break circular dependency chain
+        from database.services.farmer_service import FarmerService
+        from database.services.excel_migration_service import ExcelMigrationService
+        self.farmer_service = FarmerService()
+        self.migration_service = ExcelMigrationService(excel_path=self.excel_path)
+        
+        # Ensure tables exist
+        init_db()
         self.ensure_sample_excel_exists()
         self.reload()
 
     def reload(self) -> int:
-        """Reads the Excel sheet and builds the in-memory phone lookup cache."""
-        if not self.excel_path.exists():
-            return 0
-
-        df = pd.read_excel(self.excel_path)
+        """
+        Builds the in-memory phone lookup cache.
+        Loads authoritative records from the relational database.
+        If the database has zero records, automatically migrates from Excel.
+        """
         self._cache.clear()
 
-        for _, row in df.iterrows():
-            phone = str(row.get("Phone Number", "")).strip()
-            digits = "".join(filter(str.isdigit, phone))
-            clean_phone = digits[-10:] if len(digits) >= 10 else digits
+        # Check DB farmer count
+        db_count = self.farmer_service.count_farmers()
+        if db_count == 0 and self.excel_path.exists():
+            logger.info("Database is empty. Ingesting records from Excel workbook...")
+            self.migration_service.run_migration()
 
-            if not clean_phone:
-                continue
-
-            submission = FarmerFormSubmission(
-                farmer_name=str(row.get("Farmer Name", "Kisan Bhai")).strip(),
-                phone_number=clean_phone,
-                district=str(row.get("District", "General")).strip(),
-                area_tehsil=str(row.get("Tehsil / Taluka", "")).strip(),
-                farm_size_acres=float(row.get("Farm Size (Acres)", 3.0)),
-                crop_grown=str(row.get("Crop Grown", "General")).strip(),
-                soil_type=str(row.get("Soil Type", "Black Cotton")).strip(),
-                sowing_stage=str(row.get("Crop Stage", "Vegetative")).strip(),
-                has_drip_irrigation=bool(row.get("Drip Irrigation", True))
-            )
-            self._cache[clean_phone] = submission
+        # Populate cache from database
+        db_submissions = self.farmer_service.get_all_farmer_submissions()
+        for sub in db_submissions:
+            self._cache[sub.clean_phone()] = sub
 
         return len(self._cache)
 
@@ -62,44 +67,69 @@ class ExcelProfileManager:
             return None
         digits = "".join(filter(str.isdigit, phone_number))
         clean_key = digits[-10:] if len(digits) >= 10 else digits
-        return self._cache.get(clean_key)
+        
+        # Check fast cache first
+        if clean_key in self._cache:
+            return self._cache[clean_key]
+
+        # Query database directly if not yet in cache
+        db_sub = self.farmer_service.get_farmer_submission(clean_key)
+        if db_sub:
+            self._cache[clean_key] = db_sub
+            return db_sub
+
+        return None
 
     def record_submission(self, submission: FarmerFormSubmission) -> None:
-        """Appends a new Google Form submission to the Excel sheet and updates cache."""
+        """
+        Persists a new Google Form submission into both the relational database
+        and the Excel sheet, keeping cache and storage in sync.
+        """
         clean_phone = submission.clean_phone()
         self._cache[clean_phone] = submission
 
-        # Load existing or create new DataFrame
-        if self.excel_path.exists():
-            df = pd.read_excel(self.excel_path, dtype={"Phone Number": str})
-        else:
-            df = pd.DataFrame()
+        # 1. Persist to relational database
+        try:
+            self.farmer_service.upsert_from_form_submission(submission)
+            logger.info(f"Persisted farmer submission to database for: {submission.farmer_name} ({clean_phone})")
+        except Exception as e:
+            logger.error(f"Failed to persist submission to database: {e}")
 
-        if "Phone Number" in df.columns:
-            df["Phone Number"] = df["Phone Number"].astype(str)
+        # 2. Append/Update Excel spreadsheet for external compatibility
+        try:
+            if self.excel_path.exists():
+                df = pd.read_excel(self.excel_path, dtype={"Phone Number": str})
+            else:
+                df = pd.DataFrame()
 
-        new_row = {
-            "Farmer Name": submission.farmer_name,
-            "Phone Number": clean_phone,
-            "District": submission.district,
-            "Tehsil / Taluka": submission.area_tehsil,
-            "Farm Size (Acres)": submission.farm_size_acres,
-            "Crop Grown": submission.crop_grown,
-            "Soil Type": submission.soil_type,
-            "Crop Stage": submission.sowing_stage,
-            "Drip Irrigation": "Yes" if submission.has_drip_irrigation else "No",
-            "Submission Date": submission.submission_timestamp.strftime("%Y-%m-%d %H:%M")
-        }
+            if "Phone Number" in df.columns:
+                df["Phone Number"] = df["Phone Number"].astype(str)
 
-        # Remove existing record if phone already present to update cleanly
-        if "Phone Number" in df.columns:
-            df = df[df["Phone Number"] != clean_phone]
-        
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        df.to_excel(self.excel_path, index=False)
+            new_row = {
+                "Farmer Name": submission.farmer_name,
+                "Phone Number": clean_phone,
+                "District": submission.district,
+                "Tehsil / Taluka": submission.area_tehsil,
+                "Farm Size (Acres)": submission.farm_size_acres,
+                "Crop Grown": submission.crop_grown,
+                "Soil Type": submission.soil_type,
+                "Crop Stage": submission.sowing_stage,
+                "Drip Irrigation": "Yes" if submission.has_drip_irrigation else "No",
+                "Submission Date": submission.submission_timestamp.strftime("%Y-%m-%d %H:%M")
+            }
+
+            if "Phone Number" in df.columns:
+                df = df[df["Phone Number"] != clean_phone]
+
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            df.to_excel(self.excel_path, index=False)
+        except Exception as e:
+            logger.error(f"Failed to update Excel file: {e}")
 
     def get_all_farmers(self) -> List[FarmerFormSubmission]:
         """Returns all registered farmers."""
+        if not self._cache:
+            self.reload()
         return list(self._cache.values())
 
     def ensure_sample_excel_exists(self) -> None:

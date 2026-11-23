@@ -37,6 +37,8 @@ app = FastAPI(
     version="2.0.0"
 )
 
+from database.services.deduplication_service import DeduplicationService
+
 # Shared Core Singletons
 excel_manager = ExcelProfileManager()
 group_manager = WhatsAppGroupManager()
@@ -45,8 +47,9 @@ farmer_agent = FarmerAgent(default_form_link="https://forms.gle/WeeklyFarmerSurv
 form_broadcaster = FormBroadcaster(whatsapp_client=whatsapp_client)
 audit_logger = AuditLogger(max_history=500)
 
-# Recent message cache to prevent processing duplicate webhook deliveries from Meta
-processed_message_ids = deque(maxlen=1000)
+# Persistent database-backed message deduplication service
+dedup_service = DeduplicationService()
+processed_message_ids = dedup_service._memory_cache
 
 class IncomingWebhookMessage(BaseModel):
     sender_phone: str
@@ -61,71 +64,91 @@ def process_message_background(msg: IncomingWebhookMessage):
     Background worker that runs RAG retrieval, LLM synthesis, and WhatsApp delivery
     without delaying the immediate HTTP 200 response to Meta's webhook.
     """
-    if msg.message_id in processed_message_ids:
-        logger.info(f"Duplicate message {msg.message_id} skipped.")
+    if not dedup_service.claim_message(msg.message_id, msg.sender_phone):
+        logger.info(f"Duplicate message {msg.message_id} skipped in background.")
         return
-    processed_message_ids.append(msg.message_id)
 
-    # 1. Resolve Group & District context
+    phone_masked = f"******{msg.sender_phone[-4:]}" if len(msg.sender_phone) >= 4 else msg.sender_phone
     group_id = msg.group_id or "group_general"
     group_info = group_manager.get_group(group_id)
     district_name = group_info.district if group_info else "General"
     group_name = group_info.group_name if group_info else "General Farmer Group"
 
-    # 2. Look up Farmer Profile in Excel database by phone number
-    registered_farmer = excel_manager.lookup_farmer(msg.sender_phone)
-    if registered_farmer:
-        logger.info(f"✅ Recognized Farmer from Excel: {registered_farmer.farmer_name} ({registered_farmer.district}, Crop: {registered_farmer.crop_grown})")
-        profile = FarmerProfile(
-            name=registered_farmer.farmer_name,
-            phone=registered_farmer.phone_number,
-            district=registered_farmer.district,
-            crop=registered_farmer.crop_grown,
-            soil_type=registered_farmer.soil_type,
-            farm_size=f"{registered_farmer.farm_size_acres} Acres"
+    try:
+        # 1. Look up Farmer Profile in Excel database by phone number
+        registered_farmer = excel_manager.lookup_farmer(msg.sender_phone)
+        if registered_farmer:
+            logger.info(f"✅ Recognized Farmer from Excel: {registered_farmer.farmer_name} ({registered_farmer.district}, Crop: {registered_farmer.crop_grown})")
+            profile = FarmerProfile(
+                name=registered_farmer.farmer_name,
+                phone=registered_farmer.phone_number,
+                district=registered_farmer.district,
+                crop=registered_farmer.crop_grown,
+                soil_type=registered_farmer.soil_type,
+                farm_size=f"{registered_farmer.farm_size_acres} Acres"
+            )
+        else:
+            # Fallback to group default crop if farmer hasn't filled the form yet
+            default_crop = group_info.primary_crops[0] if (group_info and group_info.primary_crops) else "General"
+            profile = FarmerProfile(
+                name=msg.sender_name or "किसान भाई",
+                phone=msg.sender_phone,
+                district=district_name,
+                crop=default_crop
+            )
+
+        # 2. Process via FarmerAgent (Classifier -> RAG -> LLM -> WhatsApp Formatter)
+        response = farmer_agent.process_message(
+            message=msg.message_text,
+            sender_phone=msg.sender_phone,
+            sender_name=msg.sender_name,
+            group_id=group_id,
+            profile=profile
         )
-    else:
-        # Fallback to group default crop if farmer hasn't filled the form yet
-        default_crop = group_info.primary_crops[0] if (group_info and group_info.primary_crops) else "General"
-        profile = FarmerProfile(
-            name=msg.sender_name or "किसान भाई",
-            phone=msg.sender_phone,
+
+        # 3. Dispatch Reply if actionable
+        if response.reply_text:
+            if whatsapp_client.is_live:
+                recipient = msg.sender_phone
+            else:
+                recipient = group_id if (group_id and group_id.startswith("group_")) else msg.sender_phone
+            whatsapp_client.send_message(to=recipient, message_text=response.reply_text)
+            masked_recipient = f"******{recipient[-4:]}" if (recipient and recipient.isdigit() and len(recipient) >= 4) else recipient
+            logger.info(f"Dispatched reply to {masked_recipient} (Status: {response.status})")
+        else:
+            logger.info(f"🔕 Message from {msg.sender_name} was silently ignored: {response.reason}")
+
+        # 4. Log to Audit History for Admin Dashboard
+        audit_logger.log(
+            sender_name=profile.name,
+            sender_phone=msg.sender_phone,
+            district=profile.district,
+            group_id=group_id,
+            group_name=group_name,
+            incoming_text=msg.message_text,
+            category=response.category.value,
+            action=response.status,
+            bot_reply=response.reply_text,
+            rag_sources=response.rag_sources,
+            processing_time_ms=response.processing_time_ms,
+            is_escalated=response.requires_admin_alert
+        )
+        dedup_service.complete_message(msg.message_id)
+    except Exception as ex:
+        logger.error(f"Error processing background message {msg.message_id} from {phone_masked}: {ex}", exc_info=True)
+        dedup_service.fail_message(msg.message_id, str(ex))
+        audit_logger.log(
+            sender_name=msg.sender_name or "Unknown",
+            sender_phone=msg.sender_phone,
             district=district_name,
-            crop=default_crop
+            group_id=group_id,
+            group_name=group_name,
+            incoming_text=msg.message_text,
+            category="PROCESSING_ERROR",
+            action="FAILED",
+            bot_reply="An internal error occurred while processing this message.",
+            is_escalated=True
         )
-
-    # 3. Process via FarmerAgent (Classifier -> RAG -> LLM -> WhatsApp Formatter)
-    response = farmer_agent.process_message(
-        message=msg.message_text,
-        sender_phone=msg.sender_phone,
-        sender_name=msg.sender_name,
-        group_id=group_id,
-        profile=profile
-    )
-
-    # 4. Dispatch Reply if actionable
-    if response.reply_text:
-        recipient = group_id if group_id.startswith("group_") else msg.sender_phone
-        whatsapp_client.send_message(to=recipient, message_text=response.reply_text)
-        logger.info(f"Dispatched reply to {recipient} (Status: {response.status})")
-    else:
-        logger.info(f"🔕 Message from {msg.sender_name} was silently ignored: {response.reason}")
-
-    # 5. Log to Audit History for Admin Dashboard
-    audit_logger.log(
-        sender_name=profile.name,
-        sender_phone=msg.sender_phone,
-        district=profile.district,
-        group_id=group_id,
-        group_name=group_name,
-        incoming_text=msg.message_text,
-        category=response.category.value,
-        action=response.status,
-        bot_reply=response.reply_text,
-        rag_sources=response.rag_sources,
-        processing_time_ms=response.processing_time_ms,
-        is_escalated=response.requires_admin_alert
-    )
 
 @app.get("/", tags=["Health"])
 def root_status():
@@ -183,12 +206,12 @@ def verify_meta_webhook(
     Meta WhatsApp Cloud API Verification Endpoint.
     Validates token when setting up Webhook URL in Meta App Dashboard.
     """
-    logger.info(f"Webhook verification attempt. Mode: {hub_mode}, Token: {hub_verify_token}")
-    if hub_mode == "subscribe" and hub_verify_token == DEFAULT_VERIFY_TOKEN:
+    logger.info(f"Webhook verification attempt. Mode: {hub_mode}")
+    if hub_mode == "subscribe" and hub_verify_token and hub_verify_token == DEFAULT_VERIFY_TOKEN:
         logger.info("✅ Webhook verified successfully with Meta!")
-        return PlainTextResponse(content=hub_challenge, status_code=200)
+        return PlainTextResponse(content=hub_challenge or "", status_code=200)
 
-    logger.warning("❌ Webhook verification failed: invalid verify_token")
+    logger.warning("❌ Webhook verification failed: invalid verify_token or mode")
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Verification token mismatch")
 
 @app.post("/webhook", tags=["WhatsApp Webhook"])
@@ -199,35 +222,76 @@ async def receive_whatsapp_event(request: Request, background_tasks: BackgroundT
     """
     try:
         body = await request.json()
-    except Exception:
+    except Exception as json_err:
+        logger.warning(f"Malformed JSON payload in webhook request: {json_err}")
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Parse standard Meta Cloud API payload structure
+    if not isinstance(body, dict):
+        logger.warning("Invalid webhook body structure: expected a JSON object.")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload: expected an object")
+
+    # Parse standard Meta Cloud API payload structure defensively
     entries = body.get("entry", [])
+    if not isinstance(entries, list):
+        entries = []
+
     for entry in entries:
+        if not isinstance(entry, dict):
+            continue
         changes = entry.get("changes", [])
+        if not isinstance(changes, list):
+            continue
         for change in changes:
+            if not isinstance(change, dict):
+                continue
             value = change.get("value", {})
+            if not isinstance(value, dict):
+                continue
             messages = value.get("messages", [])
             contacts = value.get("contacts", [])
+            if not isinstance(messages, list):
+                messages = []
+            if not isinstance(contacts, list):
+                contacts = []
 
-            contact_map = {c.get("wa_id"): c.get("profile", {}).get("name") for c in contacts}
+            contact_map = {
+                c.get("wa_id"): c.get("profile", {}).get("name")
+                for c in contacts
+                if isinstance(c, dict)
+            }
 
             for m in messages:
-                msg_type = m.get("type")
-                if msg_type != "text":
-                    continue  # We process text messages; media handled in Phase 6
-
-                sender_phone = m.get("from", "")
-                sender_name = contact_map.get(sender_phone, "किसान भाई")
-                msg_text = m.get("text", {}).get("body", "")
+                if not isinstance(m, dict):
+                    continue
+                msg_type = m.get("type", "text")
+                sender_phone = str(m.get("from", "")).strip()
                 msg_id = m.get("id", f"msg_{time.time()}")
+
+                # Check unsupported message types without crashing
+                if msg_type != "text":
+                    phone_masked = f"******{sender_phone[-4:]}" if len(sender_phone) >= 4 else "unknown"
+                    logger.info(f"Received non-text message type '{msg_type}' from {phone_masked}. Skipping (media support scheduled for Phase 4).")
+                    continue
+
+                msg_text = m.get("text", {}).get("body", "") if isinstance(m.get("text"), dict) else ""
+                
+                # Validate required message text
+                if not msg_text or not msg_text.strip():
+                    logger.warning(f"Empty text in message {msg_id}; skipping.")
+                    continue
+
+                # Persistent + RAM deduplicate immediately to avoid queueing duplicate background workers
+                if dedup_service.is_duplicate(msg_id):
+                    logger.info(f"Duplicate incoming message {msg_id} dropped at ingress.")
+                    continue
+
+                sender_name = contact_map.get(sender_phone, "किसान भाई")
                 group_id = m.get("group_id") or value.get("metadata", {}).get("group_id", "group_nashik_01")
 
                 incoming = IncomingWebhookMessage(
                     sender_phone=sender_phone,
                     sender_name=sender_name,
-                    message_text=msg_text,
+                    message_text=msg_text.strip(),
                     message_id=msg_id,
                     group_id=group_id
                 )

@@ -22,6 +22,7 @@ from form_automation.form_broadcast import FormBroadcaster
 from .whatsapp_client import WhatsAppCloudClient
 from .group_manager import WhatsAppGroupManager
 from .message_logger import AuditLogger
+from media.orchestrator import MultimodalOrchestrator, MultimodalRequest, MediaAttachment
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -50,6 +51,7 @@ form_broadcaster = FormBroadcaster(whatsapp_client=whatsapp_client)
 audit_logger = AuditLogger(max_history=500)
 outbox_service = OutboxService(whatsapp_client=whatsapp_client)
 farmer_service = FarmerService()
+multimodal_orchestrator = MultimodalOrchestrator()
 
 # Persistent database-backed message deduplication service
 dedup_service = DeduplicationService()
@@ -63,6 +65,37 @@ class IncomingWebhookMessage(BaseModel):
     group_id: Optional[str] = None
     timestamp: Optional[str] = None
 
+
+def process_multimodal_background(mm_request):
+    """
+    Background worker for multimodal (audio/image/video) messages.
+    Routes through MultimodalOrchestrator and dispatches replies via OutboxService.
+    """
+    from media.orchestrator import MultimodalRequest
+    if not dedup_service.claim_message(mm_request.message_id, mm_request.sender_phone):
+        logger.info(f"Duplicate media message {mm_request.message_id} skipped in background.")
+        return
+
+    try:
+        result = multimodal_orchestrator.process(mm_request)
+        if result.reply_text and result.status not in ("IGNORED",):
+            # Enqueue in transactional outbox, then dispatch pending messages
+            outbox_id = outbox_service.enqueue(
+                recipient_phone=mm_request.sender_phone,
+                message_text=result.reply_text,
+                idempotency_key=f"mm_out_{mm_request.message_id}",
+            )
+            outbox_service.process_pending()
+            logger.info(
+                f"Multimodal: {mm_request.sender_phone} | intent={result.intent} | "
+                f"status={result.status} | media={result.media_records_created} | "
+                f"outbox_id={outbox_id}"
+            )
+        dedup_service.complete_message(mm_request.message_id)
+    except Exception as ex:
+        logger.error(f"Error in multimodal background worker {mm_request.message_id}: {ex}", exc_info=True)
+        dedup_service.fail_message(mm_request.message_id, str(ex))
+
 def process_message_background(msg: IncomingWebhookMessage):
     """
     Background worker that runs RAG retrieval, LLM synthesis, and WhatsApp delivery
@@ -71,7 +104,6 @@ def process_message_background(msg: IncomingWebhookMessage):
     if not dedup_service.claim_message(msg.message_id, msg.sender_phone):
         logger.info(f"Duplicate message {msg.message_id} skipped in background.")
         return
-
     phone_masked = f"******{msg.sender_phone[-4:]}" if len(msg.sender_phone) >= 4 else msg.sender_phone
     group_id = msg.group_id or "group_general"
     group_info = group_manager.get_group(group_id)
@@ -301,10 +333,39 @@ async def receive_whatsapp_event(request: Request, background_tasks: BackgroundT
                 sender_phone = str(m.get("from", "")).strip()
                 msg_id = m.get("id", f"msg_{time.time()}")
 
-                # Check unsupported message types without crashing
+                # Route media messages to multimodal orchestrator
                 if msg_type != "text":
-                    phone_masked = f"******{sender_phone[-4:]}" if len(sender_phone) >= 4 else "unknown"
-                    logger.info(f"Received non-text message type '{msg_type}' from {phone_masked}. Skipping (media support scheduled for Phase 4).")
+                    # Build attachment descriptor from webhook payload
+                    media_payload = m.get(msg_type, {})
+                    wa_media_id = media_payload.get("id", "") if isinstance(media_payload, dict) else ""
+                    mime_type = media_payload.get("mime_type", "application/octet-stream") if isinstance(media_payload, dict) else "application/octet-stream"
+                    caption = m.get("caption", "") or ""
+
+                    if not wa_media_id:
+                        logger.warning(f"Media message missing media ID in type={msg_type}; skipping.")
+                        continue
+
+                    # Deduplicate at ingress
+                    if dedup_service.is_duplicate(msg_id):
+                        logger.info(f"Duplicate media message {msg_id} dropped at ingress.")
+                        continue
+
+                    sender_name_mm = contact_map.get(sender_phone, "किसान भाई")
+                    attachment = MediaAttachment(
+                        wa_media_id=wa_media_id,
+                        media_type_hint=msg_type,
+                        mime_type=mime_type,
+                        caption_text=caption.strip() if caption else None,
+                    )
+                    mm_request = MultimodalRequest(
+                        sender_phone=sender_phone,
+                        sender_name=sender_name_mm,
+                        message_id=msg_id,
+                        text_body=caption.strip() if caption else None,
+                        attachments=[attachment],
+                        group_id=group_id if 'group_id' in dir() else None,
+                    )
+                    background_tasks.add_task(process_multimodal_background, mm_request)
                     continue
 
                 msg_text = m.get("text", {}).get("body", "") if isinstance(m.get("text"), dict) else ""

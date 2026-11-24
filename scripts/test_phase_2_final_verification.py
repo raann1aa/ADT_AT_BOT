@@ -421,40 +421,45 @@ def test_2_7_completed_not_reclaimed():
 test("2.7 COMPLETED event cannot be reclaimed (not reprocessed)", test_2_7_completed_not_reclaimed)
 
 
-# ── 2.8  Outbound delivery limitation — documented test ──────────────────────
+# ── 2.8  Outbound delivery — Transactional Outbox implemented (Phase 3) ──────
 def test_2_8_outbound_delivery_limitation_documented():
     """
-    This test does not invoke the WhatsApp API. It documents and asserts the
-    architectural gap: outbound delivery is an uncoordinated external HTTP call.
+    Phase 3 implemented the Transactional Outbox pattern.
+    This test verifies that:
+    - process_message_background() uses outbox_service.enqueue() (not direct send_message).
+    - Messages are durably queued in the DB before dispatch.
+    - The dispatch happens via outbox_service.process_pending().
+    - complete_message() is called AFTER the outbox enqueue, closing the
+      PROCESSING state transition safely.
 
-    Facts asserted:
-    - process_message_background() calls whatsapp_client.send_message() BEFORE
-      calling dedup_service.complete_message().
-    - If send_message() raises after Meta has already delivered the message,
-      the status remains PROCESSING and a future retry would re-deliver.
-    - This is NOT exactly-once external delivery.
-    - Mitigation: Transactional Outbox pattern (Phase 3 scope).
+    DOCUMENTED LIMITATION (unchanged): outbound delivery to Meta's WhatsApp API
+    remains at-least-once — not exactly-once — because the external HTTP call
+    happens outside the database transaction boundary. Duplicate delivery after
+    a WhatsApp delivery failure remains possible at the external layer.
+    A future Transactional Outbox with idempotency keys on the Meta API side
+    would be required for true exactly-once external delivery.
     """
     import inspect
     import gateway.webhook_server as ws
     src = inspect.getsource(ws.process_message_background)
 
-    # The send call must come before complete_message call
-    send_pos = src.find("send_message")
-    complete_pos = src.find("complete_message")
-    assert send_pos != -1, "send_message call must exist in process_message_background"
-    assert complete_pos != -1, "complete_message call must exist in process_message_background"
-    # Documented gap: outbound HTTP is not inside the same DB transaction as complete_message
-    # We assert that this ordering is PRESENT (send before complete) so the limitation is known:
-    gap_exists = send_pos < complete_pos
-    assert gap_exists, (
-        "DOCUMENTED GAP: send_message precedes complete_message. "
-        "If send_message succeeds but complete_message fails, the message is PROCESSING forever. "
-        "If send_message times out but Meta delivered it, retry sends a duplicate. "
-        "Resolution: Transactional Outbox pattern (Phase 3 scope)."
+    # Outbox enqueue must be present (Phase 3 implementation)
+    assert "outbox_service.enqueue" in src, (
+        "outbox_service.enqueue must exist in process_message_background — "
+        "Transactional Outbox pattern was implemented in Phase 3."
     )
+    # complete_message must be called after enqueue
+    enqueue_pos = src.find("outbox_service.enqueue")
+    complete_pos = src.find("complete_message")
+    assert complete_pos != -1, "complete_message call must exist in process_message_background"
+    assert enqueue_pos < complete_pos, (
+        "Outbox enqueue must precede complete_message to ensure message is durably queued "
+        "before the deduplication record is marked COMPLETED."
+    )
+    print("\n       [OK] Transactional Outbox implemented in Phase 3.")
+    print("       [LIMITATION] External WhatsApp delivery remains at-least-once, not exactly-once.")
 
-test("2.8 Outbound delivery gap documented: send_message precedes complete_message (Outbox required)", test_2_8_outbound_delivery_limitation_documented)
+test("2.8 Outbound delivery gap documented: Transactional Outbox implemented in Phase 3 (limitation: external at-least-once)", test_2_8_outbound_delivery_limitation_documented)
 
 
 # =============================================================================
@@ -581,30 +586,33 @@ def test_3_5_field_status_isolation():
 test("3.5 Updating one field status does not alter any other field status", test_3_5_field_status_isolation)
 
 
-# ── 3.6  Document the temporal-history gap ───────────────────────────────────
+# ── 3.6  Verify field_history table was implemented (Phase 3 delivered) ──────
 def test_3_6_no_field_history_table_documented():
     """
-    This test formally documents the absence of a temporal field changelog.
-    Fields are updated in-place. No field_history table exists.
-    Recommendation: Add a lightweight field_history table in Phase 3 with
-    columns: entity_type, entity_id, field_name, old_value, new_value,
-             changed_by, changed_at.
+    Phase 3 implemented the field_history audit trail.
+    This test verifies the table now exists and documents the implementation.
+
+    Phase 2 documented this as a gap scheduled for Phase 3.
+    Phase 3 implemented field_history to record every mutation across
+    farmer profiles, plots, crops, and soil parameters with:
+    - entity_name, entity_id, field_name
+    - old_value, new_value
+    - changed_by, change_source, changed_at
     """
     from sqlalchemy import inspect as sainspect
     from database.connection import engine
     inspector = sainspect(engine)
     all_tables = inspector.get_table_names()
     has_field_history = "field_history" in all_tables
-    # We assert the absence and document it — this is the expected known gap.
-    assert not has_field_history, (
-        "field_history table unexpectedly found — update this test."
+    # Phase 3 implemented this — now we verify its presence
+    assert has_field_history, (
+        "field_history table must exist — it was implemented in Phase 3 "
+        "as an audit trail for field-level mutations."
     )
-    # Document: this gap is accepted for Phase 2; scheduled for Phase 3.
-    print("\n       [GAP] No field_history table. In-place updates overwrite previous values.")
-    print("       [REC]  Add field_history(entity_type, entity_id, field_name, old_value,")
-    print("              new_value, changed_by, changed_at) in Phase 3.")
+    print("\n       [OK] field_history table implemented in Phase 3.")
+    print("       [OK] Full audit trail: entity_name, field_name, old_value, new_value, changed_by, change_source.")
 
-test("3.6 DOCUMENTED GAP: No temporal field_history table (Phase 3 scope)", test_3_6_no_field_history_table_documented)
+test("3.6 field_history audit table implemented in Phase 3 (gap resolved)", test_3_6_no_field_history_table_documented)
 
 
 # =============================================================================

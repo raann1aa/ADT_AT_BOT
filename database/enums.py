@@ -119,3 +119,23 @@ class AgriculturalIntent(str, Enum):
     DISTRESS_EMERGENCY = "DISTRESS_EMERGENCY"               # Critical crop loss, fire, flood, acute emergency
     OFF_TOPIC_OTHER = "OFF_TOPIC_OTHER"                     # Unrelated forwards, jokes, out-of-domain chatter
 
+
+class MediaType(str, Enum):
+    """Supported multimedia formats from WhatsApp."""
+    AUDIO = "AUDIO"
+    VOICE_NOTE = "VOICE_NOTE"
+    IMAGE = "IMAGE"
+    VIDEO = "VIDEO"
+    DOCUMENT = "DOCUMENT"
+
+
+class MediaProcessingStatus(str, Enum):
+    """Lifecycle status for ingested multimedia attachments."""
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    PROCESSED = "PROCESSED"
+    FAILED = "FAILED"
+    CORRUPTED = "CORRUPTED"
+    EXPIRED = "EXPIRED"
+
+

@@ -17,7 +17,8 @@ from .connection import Base
 from .enums import (
     VerificationStatus, PlantingSeason, AreaUnit,
     IssuePriority, IssueStatus, TaskTargetRole, TaskStatus, WebhookEventStatus,
-    OutboxMessageStatus, ConversationState, AgriculturalIntent
+    OutboxMessageStatus, ConversationState, AgriculturalIntent,
+    MediaType, MediaProcessingStatus,
 )
 
 
@@ -542,4 +543,93 @@ class FieldHistory(Base):
 
     def __repr__(self):
         return f"<FieldHistory(entity='{self.entity_type}#{self.entity_id}', field='{self.field_name}', by='{self.changed_by}')>"
+
+
+# ---------------------------------------------------------------------------
+# 9. Multimodal Media Records & Visual Observations (Phase 4)
+# ---------------------------------------------------------------------------
+
+class MediaRecord(Base):
+    """
+    Ingested multimedia attachments (audio notes, crop images, videos).
+    Tracks metadata, storage paths, processing state, transcription, and linkage to Farmer and Session.
+    """
+    __tablename__ = "media_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    media_id = Column(String(100), nullable=False, unique=True, index=True)
+    farmer_id = Column(Integer, ForeignKey("farmers.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(Integer, ForeignKey("conversation_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    media_type = Column(SQLEnum(MediaType, native_enum=False), nullable=False, index=True)
+    mime_type = Column(String(100), nullable=False)
+    file_path = Column(String(255), nullable=True)
+    file_size_bytes = Column(Integer, default=0, nullable=False)
+    source_url = Column(String(500), nullable=True)
+    caption_text = Column(Text, nullable=True)
+    status = Column(SQLEnum(MediaProcessingStatus, native_enum=False), default=MediaProcessingStatus.PENDING, nullable=False, index=True)
+    retry_count = Column(Integer, default=0, nullable=False)
+    max_retries = Column(Integer, default=3, nullable=False)
+    error_message = Column(Text, nullable=True)
+
+    # Transcription / analysis outputs
+    transcription_text = Column(Text, nullable=True)
+    detected_language = Column(String(20), nullable=True)
+    transcription_confidence = Column(Float, nullable=True)
+    
+    # Video metadata
+    duration_seconds = Column(Float, nullable=True)
+    extracted_frame_count = Column(Integer, default=0, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    farmer = relationship("Farmer")
+    session = relationship("ConversationSession")
+    visual_observations = relationship("VisualObservation", back_populates="media_record", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<MediaRecord(id='{self.media_id}', type='{self.media_type.value}', status='{self.status.value}')>"
+
+
+class VisualObservation(Base):
+    """
+    Structured visual symptom analysis extracted from photos or extracted video frames.
+    Distinguishes objective visual observations from diagnostic interpretations.
+    """
+    __tablename__ = "visual_observations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    observation_id = Column(String(100), nullable=False, unique=True, index=True)
+    media_record_id = Column(Integer, ForeignKey("media_records.id", ondelete="CASCADE"), nullable=False, index=True)
+    frame_timestamp_sec = Column(Float, nullable=True)  # Populated for video frames
+    frame_index = Column(Integer, default=0, nullable=False)
+
+    # Visual findings
+    identified_crop = Column(String(100), nullable=True)
+    leaf_discoloration = Column(Boolean, default=False, nullable=False)
+    yellowing = Column(Boolean, default=False, nullable=False)
+    spots_lesions = Column(Boolean, default=False, nullable=False)
+    wilting = Column(Boolean, default=False, nullable=False)
+    visible_pest_damage = Column(Boolean, default=False, nullable=False)
+    physical_damage = Column(Boolean, default=False, nullable=False)
+    general_condition = Column(String(100), default="NORMAL", nullable=False)
+    observed_symptoms_json = Column(Text, nullable=True)  # JSON list of detailed symptom descriptors
+
+    # Quality & diagnostic confidence
+    image_quality = Column(String(50), default="GOOD", nullable=False)  # GOOD, BLURRY, POOR_LIGHTING, LOW_RESOLUTION
+    confidence = Column(Float, default=0.0, nullable=False)
+    uncertainty_notes = Column(Text, nullable=True)
+    additional_info_required = Column(Text, nullable=True)
+    recommended_action = Column(String(100), default="ANSWER", nullable=False)
+    possible_diagnoses_json = Column(Text, nullable=True)  # JSON candidate causes with caveat "UNCONFIRMED"
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Relationships
+    media_record = relationship("MediaRecord", back_populates="visual_observations")
+
+    def __repr__(self):
+        return f"<VisualObservation(id='{self.observation_id}', crop='{self.identified_crop}', quality='{self.image_quality}')>"
+
 

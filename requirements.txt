@@ -23,5 +23,13 @@ uvicorn>=0.28.0
 requests>=2.31.0
 google-generativeai>=0.8.0
 langchain>=0.2.0
+httpx>=0.27.0
+
+# Phase 4 — Multimedia Processing
+opencv-python>=4.8.0           # Video frame extraction and perceptual hashing
+Pillow>=10.0.0                 # Image loading and validation
+soundfile>=0.12.0              # WAV duration estimation
+pydub>=0.25.1                  # Audio format info
+
 langchain-chroma>=0.1.0
 langchain-google-genai>=1.0.0

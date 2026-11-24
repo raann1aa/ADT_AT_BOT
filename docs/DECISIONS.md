@@ -272,3 +272,59 @@ The baseline system used 5 coarse-grained categories (`FARMING_QUERY`, `FORM_REL
 - Granular classification enables precise downstream workflow routing while preserving backward compatibility.
 - The transactional outbox guarantees that outbound messages are never lost during process crashes and provides auditability for all external communications.
 
+---
+
+## ADR-015: Media Ingestion Architecture and Safe Multi-Tenant Storage (Phase 4)
+
+### Context
+In Phase 4, the system expands to accept WhatsApp voice notes, images, and videos from farmers. Direct handling of untrusted media files poses significant security, storage, and reliability challenges:
+1. Malicious or corrupted payloads (e.g., zip bombs, disguised executables, oversized video streams).
+2. Rate-limiting and temporary URL expiration from Meta's WhatsApp Cloud API.
+3. Multi-tenant isolation: media attachments must never leak across different farmers.
+4. Database foreign-key constraints when media arrives from an unregistered phone number.
+
+### Decision
+1. Implement `MediaIngestionService` (`media/ingestion.py`) with strict MIME validation, allowed-type whitelisting, and strict size caps (16MB audio, 10MB images, 64MB video).
+2. Use SHA-256 and Meta `wa_media_id` for idempotent local caching under `data/media_cache/`. Re-transmissions return existing records without re-downloading or duplicate database rows.
+3. Introduce `MediaRecord` ORM model (`media_records` table) tracking ingestion status, MIME metadata, file paths, and retry attempts.
+4. Add safe handling for unregistered farmers: if an inbound sender phone is not yet present in the `farmers` master table, the orchestrator logs a warning and proceeds with best-effort in-memory analysis without violating foreign key constraints.
+5. Provide `register_synthetic_media` for offline test fixtures without requiring live network calls.
+
+### Rationale
+- Protects the host filesystem and database integrity from malformed media while ensuring zero data leakage between farmers.
+
+---
+
+## ADR-016: Agricultural Image Analysis Epistemic Boundaries & Unconfirmed Disease Labelling (Phase 4)
+
+### Context
+Agricultural computer vision models often misdiagnose crop diseases from single, blurry, or ambiguously lit smartphone photos taken in the field. Presenting automated AI vision findings as definitive agronomic diagnoses risks causing crop damage, inappropriate pesticide usage, financial loss, and erosion of farmer trust.
+
+### Decision
+1. Implement `AgriculturalVisionService` (`media/vision.py`) powered by Gemini multimodal vision (`gemini-2.0-flash`).
+2. **Mandatory Epistemic Boundary:** The system strictly forbids outputting definitive disease diagnoses. All detected disease conditions MUST be prefixed with `UNCONFIRMED: possible <condition>` and include an explicit disclaimer stating that laboratory confirmation or an in-person CDO/agronomist inspection is required.
+3. Image quality is evaluated before diagnostic analysis (`GOOD`, `BLURRY`, `POOR_LIGHTING`, `LOW_RESOLUTION`, `NON_AGRICULTURAL`). If quality is insufficient, the system returns a polite guidance request (`REQUEST_BETTER_IMAGE` or `NON_AGRICULTURAL`) rather than hallucinating symptoms.
+4. Visual findings are persisted in the database via `VisualObservation` ORM model (`visual_observations` table) linked to the corresponding `MediaRecord`.
+5. Severe conditions automatically trigger `recommended_action="ESCALATE_AGRONOMIST"` to prioritize field inspection by certified experts.
+6. Verified farmer profile fields (`VERIFIED` status in DB) are strictly protected and can NEVER be overwritten by uncertain visual extractions.
+
+### Rationale
+- Safeguards agricultural outcomes by maintaining strict epistemic humility and preventing automated hallucinations from posing as expert agronomic fact.
+
+---
+
+## ADR-017: Video Frame Sampling, Perceptual Hash Deduplication, and Symptom Consolidation (Phase 4)
+
+### Context
+Farmers frequently send short video clips walking through sugarcane or cotton fields. Analyzing every video frame independently with visual LLMs is computationally wasteful, financially cost-prohibitive, and leads to artificial inflation of disease symptom counts (e.g., counting the same infected leaf 30 times across consecutive frames).
+
+### Decision
+1. Implement `VideoAnalysisService` (`media/video.py`) using OpenCV (`cv2`) for local frame extraction.
+2. Restrict video processing to maximum duration of 120 seconds (`MAX_VIDEO_DURATION_SEC = 120`). Longer videos are rejected with safe, helpful guidance.
+3. Sample frames at a minimum interval of 5 seconds (`MIN_FRAME_INTERVAL_SEC = 5.0`), with a strict ceiling of at most 8 frames extracted per video clip.
+4. Apply perceptual hashing (`_compute_frame_hash`) and Hamming distance thresholding to detect and discard visually redundant or repetitive frames before sending to vision analysis.
+5. **Symptom Consolidation:** Aggregate visual symptoms across all analysed frames into a deduplicated summary list. Symptoms appearing in multiple frames are consolidated into one finding rather than treated as independent evidence.
+
+### Rationale
+- Keeps analysis latency low, minimizes API token consumption, and prevents spurious multiplication of disease severity.
+

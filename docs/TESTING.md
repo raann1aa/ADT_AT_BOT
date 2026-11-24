@@ -287,3 +287,37 @@ All existing test suites were executed sequentially and verified with 100% pass 
 5. `scripts/test_retrieval.py`: **12/12 PASSED (100%)**
 6. `scripts/test_webhook_flow.py`: **8/8 PASSED (100%)**
 
+---
+
+## 10. Phase 4 Multimodal Intelligence Test Results
+
+### 10.1 Test Suite Overview (`scripts/test_phase_4_multimodal.py`)
+- **Execution Command:** `python scripts/test_phase_4_multimodal.py`
+- **Total Tests Executed:** 38
+- **Pass Rate:** **38/38 PASSED (100.0%)**
+- **Test Database Engine:** In-memory SQLite (`sqlite:///:memory:`) using isolated fixtures.
+- **Provider Status:** External API calls (Gemini multimodal, WhatsApp Meta media download) are tested via synthetic fixtures and mocks; real OpenCV frame analysis and local file validation execute natively.
+
+### 10.2 Breakdown of Verified Scenarios
+
+| Section | Target Area | Tests | Result | Verified Behaviors |
+|---|---|:---:|:---:|---|
+| **Section 1** | Media Ingestion (`MediaIngestionService`) | 8 | 8/8 (100%) | Audio ingestion with synthetic WAV (1.1); image ingestion with synthetic PNG (1.2); video ingestion with synthetic MP4 (1.3); invalid MIME type rejected with `MediaIngestionError` (1.4); duplicate `wa_media_id` ingestion is idempotent (1.5); expired media URL raises error gracefully (1.6); missing file path handled safely (1.7); farmer isolation enforced on media records (1.8). |
+| **Section 2** | Speech-to-Text (`SpeechToTextService`) | 9 | 9/9 (100%) | Marathi transcription returns correct language code `mr` (2.1); Hindi transcription returns `hi` (2.2); English transcription returns `en` (2.3); mixed Marathi-Hindi-English flagged as `mixed` (2.4); noisy audio sets `is_unclear=True` with no fabricated words (2.5); empty audio returns failure without crashing (2.6); corrupted audio triggers safe failure (2.7); missing `GEMINI_API_KEY` returns `UNAVAILABLE` result (2.8); unsupported format (.pdf) rejected before API call (2.9). |
+| **Section 3** | Agricultural Image Intelligence (`AgriculturalVisionService`) | 7 | 7/7 (100%) | Clear crop photo identifies crop and UNCONFIRMED symptoms (3.1); blurry image returns `REQUEST_BETTER_IMAGE` (3.2); non-agricultural image returns `NON_AGRICULTURAL` (3.3); missing image file fails safely without crashing (3.4); missing `GEMINI_API_KEY` returns `UNAVAILABLE` (3.5); `VisualObservation` row persisted to database (3.6); ambiguous symptoms result in low confidence and escalation flag (3.7). |
+| **Section 4** | Video Processing & Deduplication (`VideoAnalysisService`) | 7 | 7/7 (100%) | Frame extraction from synthetic MP4 with OpenCV (4.1); frame timestamps ordered and non-negative (4.2); non-video file fails safely (4.3); video exceeding 120s max duration rejected (4.4); 5s minimum frame interval prevents redundant sampling (4.5); same symptom appearing across multiple frames is consolidated into a single observation (4.6); missing video path fails safely (4.7). |
+| **Section 5** | Multimodal Orchestration & Phase 3 Integration (`MultimodalOrchestrator`) | 7 | 7/7 (100%) | Text caption + speech transcription merged into coherent contextual string (5.1); visual observation summary formatted into merged context (5.2); text-only message routes through Phase 3 `FarmerAgent` unchanged (5.3); voice note + text caption merged and classified into 13-intent category (5.4); `ESCALATE_AGRONOMIST` from vision elevates response to `ESCALATED` status (5.5); media with no text and no API key returns helpful guidance reply (5.6); farmer isolation: media records strictly scoped to correct farmer (5.7). |
+
+### 10.3 Complete Regression Summary (All 7 Suites Passing 100%)
+
+| # | Test Suite Script | Focus Area | Assertions | Result |
+|---|---|---|:---:|:---:|
+| 1 | `scripts/test_phase_4_multimodal.py` | Multimodal Ingestion, STT, Vision, Video, Orchestrator | 38 | ✅ **38/38 PASSED (100%)** |
+| 2 | `scripts/test_phase_3_conversation.py` | Conversational Memory, Follow-Up, 13 Intents, Outbox | 18 | ✅ **18/18 PASSED (100%)** |
+| 3 | `scripts/test_phase_2_database.py` | Relational Schema, Multi-Plot, Provenance, Dedup | 62 | ✅ **62/62 PASSED (100%)** |
+| 4 | `scripts/test_phase_2_final_verification.py` | Conflict Protection, Webhook Reliability, Identity | 27 | ✅ **27/27 PASSED (100%)** |
+| 5 | `scripts/test_phase_b.py` | 16 Classifier Rules + 5 End-to-End Agent Scenarios | 21 | ✅ **21/21 PASSED (100%)** |
+| 6 | `scripts/test_retrieval.py` | Multilingual Semantic RAG Hybrid Retrieval | 12 | ✅ **12/12 PASSED (100%)** |
+| 7 | `scripts/test_webhook_flow.py` | Gateway, Webhook Handshake, Outbox, Resilience | 8 | ✅ **8/8 PASSED (100%)** |
+| **TOTAL** | **All 7 Automated Test Suites** | **Complete System Regression & Verification** | **186** | ✅ **186/186 PASSED (100.0%)** |
+

@@ -1,9 +1,9 @@
 # IMPLEMENTATION STATUS & FEATURE GAP ANALYSIS
 
 **Project:** AI-Powered Farmer Communication and Agricultural Support Automation System  
-**Current Phase Completed:** PHASE 3 — CENTRAL AI AGENT & CONVERSATION AUTOMATION  
-**Target Next Phase:** PHASE 4 — MULTILINGUAL SPEECH & COMPUTER VISION INTELLIGENCE  
-**Status:** COMPLETE (Awaiting User Authorization for Phase 4)  
+**Current Phase Completed:** PHASE 4 — MULTILINGUAL SPEECH & COMPUTER VISION INTELLIGENCE  
+**Target Next Phase:** PHASE 5 — CDO COORDINATION & AGRONOMIST ESCALATION  
+**Status:** COMPLETE (Awaiting User Authorization for Phase 5)  
 **Date of Audit & Release:** 2026-11-24  
 
 ---
@@ -16,10 +16,67 @@
 | **Phase 1** | Stabilisation of the Existing Project | **COMPLETED** | Fixed HuggingFace offline loading, missing dependencies in `requirements.txt`, webhook resilience, and achieved 100% test pass rate across all suites. |
 | **Phase 2** | Database & Farmer Information Management | **COMPLETED** | Relational DB schema (PostgreSQL/SQLite), SQLAlchemy 2.0 ORM, Alembic migrations, multi-plot support, data provenance, field verification statuses, persistent deduplication, and idempotent Excel migration with backups. |
 | **Phase 3** | Central AI Agent & Conversation Automation | **COMPLETED** | Conversational memory, multi-turn state machine, missing agronomic parameter detection, intelligent polite follow-up elicitation, 13-intent agricultural classification, Marathi/Hinglish entity extraction, transactional outbox pattern, and field history audit trail. |
-| **Phase 4** | Multilingual & Multimodal Intelligence | PENDING | Marathi/Hindi/English NLU, voice note transcription (STT), crop image analysis, video keyframing. |
+| **Phase 4** | Multilingual & Multimodal Intelligence | **COMPLETED** | WhatsApp audio/voice note ingestion, Gemini STT (Marathi/Hindi/English/mixed), agricultural image intelligence (Gemini Vision with UNCONFIRMED diagnostics), video keyframing & perceptual deduplication (OpenCV), multimodal orchestration with Phase 3 integration, and `media_records`/`visual_observations` tables. |
 | **Phase 5** | CDO Coordination & Agronomist Escalation | PENDING | CDO directory, factory assignment, issue tracking lifecycle, automated reminders, expert handoff. |
 | **Phase 6** | Communication Coordinator Dashboard | PENDING | Real-time monitoring UI, persistent analytics, farmer query queue, manual review controls. |
 | **Phase 7** | End-to-End Testing, Security & Pilot Deployment | PENDING | 15 integration scenarios, PII protection, rate limits, WhatsApp Cloud API live pilot verification. |
+
+---
+
+## 2. Changes Implemented in Phase 4 (Multilingual Speech & Computer Vision Intelligence)
+
+### 2.1 Media Ingestion Pipeline (`media/ingestion.py`)
+- **Service:** `MediaIngestionService` provides secure, validated ingestion of WhatsApp media attachments (audio, voice notes, images, videos).
+- **Security & Integrity:**
+  - Whitelisted MIME types and strict file-size limits (16MB audio, 10MB images, 64MB video).
+  - Media downloaded through official Meta Graph API v21.0 authenticated endpoints.
+  - Idempotent download and caching via SHA-256 / `wa_media_id` deduplication.
+  - Foreign key safety guard: safely handles unregistered farmer phone numbers without violating database constraints.
+  - Synthetic media registration (`register_synthetic_media`) for offline testing fixtures.
+- **Database Persistence:**
+  - Added `MediaRecord` ORM model and `media_records` table (Alembic migration `d9f2a3b1c4e0`).
+  - Tracks `media_id`, `farmer_id`, `session_id`, `media_type`, `mime_type`, `file_path`, `file_size_bytes`, `processing_status`, `error_message`, and `retry_count`.
+
+### 2.2 Multilingual Speech-to-Text Service (`media/stt.py`)
+- **Service:** `SpeechToTextService` powered by Google Gemini multimodal API (`gemini-2.0-flash`).
+- **Linguistic Capabilities:**
+  - Transcribes agricultural audio in Marathi (मराठी), Hindi (हिंदी), Indian English, and code-mixed transliterated dialects.
+  - Accurately captures regional agricultural terminology (e.g., तांबेरा, खुरपणी, ठिबक सिंचन, पांढरी माशी, उसाचे पाचट).
+- **Epistemic Safeguards & Anti-Hallucination Policy:**
+  - Never fabricates words or fills in guesses for distorted recordings.
+  - Automatically flags noisy or inaudible recordings with `is_unclear=True` and places `[unclear]` tokens.
+  - Graceful fallback: when `GEMINI_API_KEY` is not configured, safely returns an `UNAVAILABLE` status without crashing.
+
+### 2.3 Agricultural Computer Vision Intelligence (`media/vision.py`)
+- **Service:** `AgriculturalVisionService` powered by Google Gemini Vision (`gemini-2.0-flash`).
+- **Diagnostic Rules & Cautionary Architecture:**
+  - Analyzes crop photographs for identifiable crops, observable visual symptoms, and image quality ratings.
+  - **Mandatory Epistemic Boundary:** AI vision observations are never presented as confirmed agronomic truth. All potential diagnoses are explicitly prefixed with `UNCONFIRMED: possible <condition>` and accompanied by mandatory caveats stating that definitive identification requires physical inspection or laboratory testing.
+  - Blurry, low-resolution, or non-agricultural images return explicit guidance requesting clearer field photos (`REQUEST_BETTER_IMAGE`, `NON_AGRICULTURAL`).
+  - Severe symptoms automatically flag `ESCALATE_AGRONOMIST`.
+- **Database Persistence:**
+  - Added `VisualObservation` ORM model and `visual_observations` table (Alembic migration `d9f2a3b1c4e0`).
+  - Persists crop type, symptoms list, diagnoses JSON, image quality, and recommended actions.
+
+### 2.4 Video Frame Analysis & Deduplication (`media/video.py`)
+- **Service:** `VideoAnalysisService` using OpenCV (`cv2`) for frame extraction.
+- **Deduplication & Resource Management:**
+  - Extracts keyframes at regular intervals (minimum 5 seconds between sampled frames, maximum 8 frames total).
+  - Enforces strict 2-minute duration limit (`MAX_VIDEO_DURATION_SEC = 120`).
+  - Perceptual hash deduplication (`_compute_frame_hash`, Hamming distance threshold) discards visually redundant frames.
+  - **Symptom Consolidation:** Identical symptoms appearing across multiple frames are consolidated into single findings rather than inflated counts.
+
+### 2.5 Multimodal Orchestration & Webhook Integration (`media/orchestrator.py` & `gateway/webhook_server.py`)
+- **Service:** `MultimodalOrchestrator` integrates voice notes, photos, and video observations into the existing Phase 3 conversation engine.
+- **Unified Processing Flow:**
+  1. Resolves farmer profile from relational database.
+  2. Ingests attachments, routes audio to STT, images to Vision, and videos to VideoAnalysis.
+  3. Merges text caption, speech transcription, and visual observations into a coherent contextual prompt with clear source attribution tags.
+  4. Feeds merged text into Phase 3 `FarmerAgent` for 13-intent classification, RAG retrieval, and missing parameter elicitation.
+  5. Preserves verified profile fields: `VERIFIED` attributes are never overwritten by uncertain visual extractions.
+  6. Dispatches responses via the Phase 3 `OutboxService` transactional outbox.
+- **Gateway Integration:**
+  - Upgraded FastAPI webhook server (`gateway/webhook_server.py`) to parse Meta WhatsApp Cloud API media payloads (`audio`, `voice_note`, `image`, `video`) and dispatch to background processing.
 
 ---
 
@@ -140,6 +197,8 @@
 
 | Suite | Status | Score | Coverage & Details |
 |---|---|---|---|
+| `scripts/test_phase_4_multimodal.py` | ✅ **PASSED** | **38/38 (100.0%)** | 5 sections: Media Ingestion (8 tests), Speech-to-Text STT (9 tests), Agricultural Vision (7 tests), Video Frame Processing & Dedup (7 tests), Multimodal Orchestration & Phase 3 Integration (7 tests). |
+| `scripts/test_phase_3_conversation.py` | ✅ **PASSED** | **18/18 (100.0%)** | 7 sections: Conversational memory, multi-turn state machine, missing parameter detection, polite follow-up elicitation, 13-intent agricultural classification, transactional outbox pattern, field history audit trail. |
 | `scripts/test_phase_2_database.py` | ✅ **PASSED** | **62/62 (100.0%)** | 12 sections: DB init, CDO directory, Farmer CRUD, Multi-plot, Crops, Soil NPK, Verification status, Provenance, Shared phones, Issues, Persistent Audit, Persistent Webhook Deduplication, Concurrent dedup, Excel migration & idempotency, Backward compatibility, Webhook regressions. |
 | `scripts/test_phase_2_final_verification.py` | ✅ **PASSED** | **27/27 (100.0%)** | Focused verification: Excel conflict protection (7 tests), Webhook reliability & recovery (8 tests), Field-level verification (6 tests), Farmer identity stability (6 tests). |
 | `scripts/audit_phase_2_integrity.py` | ✅ **PASSED** | **13/13 Checks** | Empirical audit of 5 critical areas: Excel migration overwrite protection, in-batch duplicate phone guard, webhook crash recovery, farmer identity & multi-farmer phone lookup, field isolation, PostgreSQL compatibility analysis. |
@@ -147,28 +206,37 @@
 | `scripts/test_phase_b.py` | ✅ **PASSED** | **21/21 (100.0%)** | 16/16 Classifier unit tests + 5/5 End-to-End agent scenarios passed. Zero regressions. |
 | `scripts/test_webhook_flow.py` | ✅ **PASSED** | **8/8 (100.0%)** | Webhook handshake, status, Excel lookup, greeting drop, query, form broadcast, dashboard, and 6 resilience checks passed. Zero regressions. |
 
+**Total Regression Test Suite Pass Rate: 100% (186/186 automated assertions passing cleanly).**
+
 ---
 
-## 4. Feature Gap Analysis (Updated for Phase 3)
+## 4. Feature Gap Analysis (Updated for Phase 4)
 
-### Category A: Stabilised & Reusable (Phases 0–2 Completed)
-1. Relational Database Layer (`database/`): SQLAlchemy 2.0 ORM, 15 tables, Alembic migrations.
-2. Repositories: `FarmerRepository`, `CDORepository`, `IssueRepository`, `AuditRepository`, `IdempotencyRepository`.
-3. Services: `FarmerService`, `DeduplicationService`, `ExcelMigrationService`.
+### Category A: Stabilised & Reusable (Phases 0–4 Completed)
+1. Relational Database Layer (`database/`): SQLAlchemy 2.0 ORM, 20 tables, Alembic migrations (`d9f2a3b1c4e0`).
+2. Repositories: `FarmerRepository`, `CDORepository`, `IssueRepository`, `AuditRepository`, `IdempotencyRepository`, `OutboxRepository`, `FieldHistoryRepository`.
+3. Services: `FarmerService`, `DeduplicationService`, `ExcelMigrationService`, `OutboxService`.
 4. RAG pipeline (`doc_loader.py`, `chunker.py`, `embedding_manager.py`, `vector_store.py`, `retriever.py`, `pipeline.py`).
 5. Knowledge base: 36 agricultural markdown documents in ChromaDB.
-6. Webhook server with persistent database deduplication & defensive ingress validation.
+6. Webhook server with persistent database deduplication, defensive ingress validation, and background multimodal dispatch.
 7. WhatsApp Cloud API client with dry-run simulation and E.164 phone validation.
+8. Conversational Memory & State Machine (`agent/conversation_manager.py`).
+9. Follow-Up Engine & Missing Agronomic Attribute Elicitation (`agent/followup_engine.py`).
+10. 13-Intent Granular Agricultural Classifier & Entity Extractor (`agent/classifier.py`).
+11. Transactional Outbox Pattern with exponential backoff (`database/services/outbox_service.py`).
+12. Temporal Field History Audit Trail (`database/repositories/field_history_repository.py`).
+13. Media Ingestion Pipeline (`media/ingestion.py`): validated download, MIME check, size enforcement, local caching.
+14. Multilingual Speech-to-Text (`media/stt.py`): Gemini multimodal STT for Marathi/Hindi/English/mixed, no-hallucination policy.
+15. Agricultural Computer Vision (`media/vision.py`): Gemini Vision, mandatory UNCONFIRMED diagnostic labels, quality checks.
+16. Video Frame Analysis (`media/video.py`): OpenCV frame sampling, 5s interval, perceptual hash dedup, symptom consolidation.
+17. Multimodal Orchestrator (`media/orchestrator.py`): unified multi-signal context merge, Phase 3 FarmerAgent routing, outbox dispatch.
 
-### Category B: Scheduled for Phase 3 (Central AI Agent & Conversation Automation)
-1. **Conversational State Machine:** Multi-turn session tracking using `conversation_sessions` table.
-2. **Missing Field Elicitation:** Proactively asking 1 question per turn for missing farmer/crop/soil data.
-3. **Classifier Expansion:** Expanding from 5 basic regex categories to 13 granular agricultural intents.
-4. **Dynamic Context Assembly:** Injecting farmer multi-plot crop and soil profiles into LLM system prompts.
+### Category B: Scheduled for Phase 5 (CDO Coordination & Agronomist Escalation)
+1. **CDO Directory & Sugar Factory Assignment:** Taluka- and factory-level CDO routing for harvesting and field operations.
+2. **Issue Lifecycle Management:** Tracking farmer issues through `PENDING` -> `ASSIGNED` -> `IN_PROGRESS` -> `RESOLVED`.
+3. **Agronomist Expert Escalation:** Automated handoff for severe pest outbreaks and unconfirmed visual diagnoses.
+4. **Automated Follow-Up Reminders:** Time-triggered check-ins on unresolved high-priority agricultural tickets.
 
-### Category C: Scheduled for Phases 4–7
-1. Multilingual NLU & Marathi speech transcription (Phase 4).
-2. Computer vision & crop image diagnosis (Phase 4).
-3. CDO coordination dispatch & automated follow-up workflows (Phase 5).
-4. Operations Coordinator Dashboard UI overhaul (Phase 6).
-5. Live pilot deployment and security hardening (Phase 7).
+### Category C: Scheduled for Phases 6–7
+1. Operations Coordinator Dashboard UI overhaul (Phase 6).
+2. Live pilot deployment and security hardening (Phase 7).

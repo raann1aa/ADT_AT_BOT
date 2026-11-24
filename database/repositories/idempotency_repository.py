@@ -51,13 +51,14 @@ class IdempotencyRepository:
                 existing.status == WebhookEventStatus.PROCESSING
                 and stale_threshold_seconds is not None
             ):
-                age_seconds = (datetime.now() - existing.received_at).total_seconds()
+                age_seconds = (datetime.now() - existing.created_at).total_seconds()
                 if age_seconds > stale_threshold_seconds:
                     logger.warning(
                         f"Crash recovery: Reclaiming stale message {message_id} "
                         f"(stuck in PROCESSING for {age_seconds:.1f}s > {stale_threshold_seconds}s)."
                     )
-                    existing.received_at = datetime.now()
+                    # Reset created_at so the new attempt has a fresh stale timer
+                    existing.created_at = datetime.now()
                     self.session.flush()
                     return True
 
@@ -66,7 +67,7 @@ class IdempotencyRepository:
                 logger.info(f"Retry allowed: Reclaiming FAILED message {message_id} for recovery.")
                 existing.status = WebhookEventStatus.PROCESSING
                 existing.error_message = None
-                existing.received_at = datetime.now()
+                existing.created_at = datetime.now()
                 self.session.flush()
                 return True
 
@@ -80,7 +81,11 @@ class IdempotencyRepository:
                 sender_phone=sender_phone,
                 event_type=event_type,
                 payload_hash=payload_hash,
-                status=WebhookEventStatus.PROCESSING
+                status=WebhookEventStatus.PROCESSING,
+                # Set created_at explicitly so stale-age calculation is reliable
+                # across both SQLite (where server_default may not populate the
+                # Python attribute until a refresh) and PostgreSQL.
+                created_at=datetime.now(),
             )
             self.session.add(event)
             self.session.flush()

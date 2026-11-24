@@ -236,3 +236,22 @@ Tested live Uvicorn startup and HTTP binding on `http://127.0.0.1:8000/`:
 | **Field Verification** | Updating one field's status | Updating `planting_date` status to `VERIFIED` left `name_status` and `area_status` unchanged | Confirmed field-level verification isolation |
 | **Provenance & History** | Preserving previous field values | In-place updates overwrite previous column values | Confirmed absence of temporal table; recommended dedicated `field_history` table for Phase 3 |
 | **PostgreSQL Compatibility** | Enums, FKs, pooling, migrations | Portable VARCHAR enums (`native_enum=False`), `QueuePool` for Postgres, batch migrations | Compatible schema; row-level locking (`SELECT FOR UPDATE`) requires staging verification |
+
+---
+
+## 8. Phase 2 Final Correction and Sign-Off Test Results
+
+### 8.1 Test Suite Overview (`scripts/test_phase_2_final_verification.py`)
+- **Execution Command:** `python scripts/test_phase_2_final_verification.py`
+- **Total Tests Executed:** 27
+- **Pass Rate:** **27/27 PASSED (100.0%)**
+- **Test Database Engine:** In-memory SQLite (`sqlite:///:memory:`) using completely isolated fixtures.
+
+### 8.2 Breakdown of Verified Scenarios
+
+| Section | Target Area | Tests | Result | Verified Behaviors |
+|---|---|:---:|:---:|---|
+| **Section 1** | Excel Migration Conflict Protection | 7 | 7/7 (100%) | First run creates record; identical re-run counts record as unchanged without touching `last_updated_at`; `VERIFIED` DB fields are never overwritten by stale Excel values; duplicate phone in Excel batch is skipped to prevent merging; genuinely changed unverified field is updated; missing Excel field does not corrupt record; timestamped backups created per run. |
+| **Section 2** | Webhook Processing Reliability | 8 | 8/8 (100%) | Exactly one worker claims concurrent incoming message; persistent DB ledger blocks duplicates post server restart; stale `PROCESSING` event (>300s) reclaimed; fresh `PROCESSING` (<300s) not reclaimed; `FAILED` blocked by default but retryable with `allow_failed_retry=True`; `COMPLETED` never reprocessed; external WhatsApp delivery limitation documented (Transactional Outbox required for Phase 3). |
+| **Section 3** | Field-Level Verification | 6 | 6/6 (100%) | Farmer model has per-field statuses (`name_status`, `village_status`, `tehsil_status`); CropRecord has 5 granular statuses; SoilProfile has 3 granular statuses; FarmPlot has 2 per-field statuses; updating one field status leaves all other fields intact; documented gap of missing `field_history` temporal table. |
+| **Section 4** | Farmer Identity | 6 | 6/6 (100%) | `farmer_id` is stable business identity; changing phone number preserves `farmer_id` and DB PK; multiple farmers can share a phone via `FarmerContact`; duplicate primary phone rejected by unique constraint; `lookup_all_by_phone` returns all matches to eliminate arbitrary `.first()` selection; `generate_next_farmer_id` produces unique `FARM-XXXXX` sequence. |

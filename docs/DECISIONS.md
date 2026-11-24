@@ -223,9 +223,9 @@ Following Phase 2 implementation, a rigorous empirical data integrity audit test
    - **In-Batch Duplicate Phone Guard:** If two rows in the same Excel spreadsheet share a phone number, the service flags a warning and refuses to overwrite the first row with the second row, preventing destructive household merges.
 
 2. **Webhook Recovery & Transaction Boundary:**
-   - **Stale Processing Reclamation:** `IdempotencyRepository.claim_message` was enhanced with `stale_threshold_seconds` support to reclaim messages orphaned in `PROCESSING` status if a worker crashed.
+   - **Stale Processing Reclamation:** `IdempotencyRepository.claim_message` was enhanced with `stale_threshold_seconds` support to reclaim messages orphaned in `PROCESSING` status if a worker crashed. Explicit `created_at=datetime.now()` was added during model instantiation to ensure deterministic age calculation across both SQLite and PostgreSQL.
    - **Explicit Failed Retry:** Added `allow_failed_retry` capability for controlled re-dispatch.
-   - **Outbox Pattern Recommendation:** Identified that outbound WhatsApp API calls (`WhatsAppCloudClient.send_message`) must be decoupled via a Transactional Outbox table in Phase 3 to eliminate duplicate delivery risks if DB commits fail after successful HTTP transport.
+   - **Outbound WhatsApp Delivery Limitation & Outbox Pattern:** Identified and verified that outbound WhatsApp API calls (`WhatsAppCloudClient.send_message`) occur before `complete_message()` is committed. This means the system does NOT claim exactly-once external WhatsApp delivery. To eliminate duplicate delivery risks if DB commits fail after successful HTTP transport, a **Transactional Outbox Pattern** (`outbox_messages` table + background dispatcher) is scheduled for Phase 3.
 
 3. **Multi-Farmer Disambiguation:**
    - Added `FarmerRepository.lookup_all_by_phone(phone)` returning a list of all farmers sharing a primary or alternate contact, eliminating arbitrary `.first()` resolution.

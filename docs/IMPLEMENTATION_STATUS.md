@@ -85,6 +85,7 @@
 | Suite | Status | Score | Coverage & Details |
 |---|---|---|---|
 | `scripts/test_phase_2_database.py` | ✅ **PASSED** | **62/62 (100.0%)** | 12 sections: DB init, CDO directory, Farmer CRUD, Multi-plot, Crops, Soil NPK, Verification status, Provenance, Shared phones, Issues, Persistent Audit, Persistent Webhook Deduplication, Concurrent dedup, Excel migration & idempotency, Backward compatibility, Webhook regressions. |
+| `scripts/test_phase_2_final_verification.py` | ✅ **PASSED** | **27/27 (100.0%)** | Focused verification: Excel conflict protection (7 tests), Webhook reliability & recovery (8 tests), Field-level verification (6 tests), Farmer identity stability (6 tests). |
 | `scripts/audit_phase_2_integrity.py` | ✅ **PASSED** | **13/13 Checks** | Empirical audit of 5 critical areas: Excel migration overwrite protection, in-batch duplicate phone guard, webhook crash recovery, farmer identity & multi-farmer phone lookup, field isolation, PostgreSQL compatibility analysis. |
 | `scripts/test_retrieval.py` | ✅ **PASSED** | **12/12 (100.0%)** | All 12 queries achieved Rank 1 hit with 76%–99% confidence. Zero regressions. |
 | `scripts/test_phase_b.py` | ✅ **PASSED** | **21/21 (100.0%)** | 16/16 Classifier unit tests + 5/5 End-to-End agent scenarios passed. Zero regressions. |

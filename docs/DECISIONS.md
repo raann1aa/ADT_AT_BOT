@@ -235,3 +235,40 @@ Following Phase 2 implementation, a rigorous empirical data integrity audit test
 
 ### Rationale
 - Protects verified agronomic truth from legacy data pollution while providing clean recovery paths for distributed messaging.
+
+---
+
+## ADR-013: Conversational Memory, State Machine, and Polite Follow-Up Engine
+
+### Context
+In Phase 1 and 2, agent interactions were stateless: each incoming message was treated as a discrete turn without memory of previous questions or context. To elicit missing agronomic information from farmers without spamming them or overwriting verified profile facts, KrishiBot required persistent conversational sessions, dialog state management, and strict provenance protection.
+
+### Decision
+1. Implement `ConversationSession` and `ConversationMessage` in the relational database.
+2. Introduce a finite state machine via `ConversationState` (`ACTIVE`, `AWAITING_FIELD_INPUT`, `ESCALATED`, `RESOLVED`, `CLOSED`).
+3. Store conversation turns chronologically and inject recent turns into the LLM prompt context while strictly partitioning sessions by farmer ID to prevent cross-farmer contamination.
+4. Build `FollowupEngine` to inspect 10 agronomic parameters across 5 verification states (`MISSING`, `NOT_PROVIDED`, `UNKNOWN`, `PENDING_CONFIRMATION`, `VERIFIED`).
+5. Enforce that fields marked `VERIFIED` are strictly protected and can never be overwritten by conversational AI extraction. Conversational updates are marked `UNVERIFIED` with `WHATSAPP_CHAT` provenance and recorded in `FieldHistory`.
+6. Enforce polite follow-up UX: at most 1 question per turn, duplicate question avoidance, and support for Marathi, Hindi, and English phrasing.
+
+### Rationale
+- Farmers disengage if asked multiple questions at once or repeatedly asked for information they have already provided.
+- Strict protection of verified data prevents automated hallucinations from corrupting ground-truth agronomic records.
+
+---
+
+## ADR-014: 13-Category Agricultural Intent Taxonomy and Transactional Outbox Pattern
+
+### Context
+The baseline system used 5 coarse-grained categories (`FARMING_QUERY`, `FORM_RELATED`, `URGENT_DISTRESS`, `GREETING_OR_CHATTER`, `SPAM_OR_OFF_TOPIC`). As the system expands toward CDO coordination, sugar factory harvesting schedules, and weather advisories, granular intent routing is necessary. Furthermore, direct synchronous external calls to Meta's WhatsApp API risk message loss or duplicate dispatch during server crashes and network timeouts.
+
+### Decision
+1. Expand agricultural classification to 13 granular intents (`CROP_DISEASE_PEST`, `FERTILIZER_NUTRITION`, `IRRIGATION_WATER`, `VARIETY_SELECTION`, `PLANTING_SOWING`, `HARVESTING_POST_HARVEST`, `WEATHER_CLIMATE`, `GOVERNMENT_SCHEME_SUBSIDY`, `CDO_COORDINATION_INQUIRY`, `FARMER_PROFILE_UPDATE`, `GENERAL_GREETING`, `DISTRESS_EMERGENCY`, `OFF_TOPIC_OTHER`).
+2. Maintain 100% backward compatibility via `INTENT_TO_LEGACY_CATEGORY` mapping all granular intents to the legacy 5 categories for existing consumers.
+3. Implement the Transactional Outbox pattern via `OutboxMessage` table and `OutboxService`. Outbound replies are committed to the database in the same transaction as incoming message processing before external dispatch.
+4. Support idempotency keys and exponential backoff retry tracking for outbound WhatsApp messages.
+
+### Rationale
+- Granular classification enables precise downstream workflow routing while preserving backward compatibility.
+- The transactional outbox guarantees that outbound messages are never lost during process crashes and provides auditability for all external communications.
+

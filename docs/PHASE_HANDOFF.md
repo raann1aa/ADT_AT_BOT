@@ -117,30 +117,46 @@ Phase 2 has successfully evolved the flatfile/in-memory data layer of ADT-AI-BOT
 
 ---
 
-## 6. Scope & Instructions for Phase 3: Central AI Agent & Conversation Automation
+## 6. Phase 3 Completion Summary (Central AI Agent & Conversation Automation)
 
-### Objective of Phase 3
-Implement a stateful, multi-turn Conversational AI Orchestrator that detects missing agronomic parameters, dynamically asks gentle follow-up questions, and expands message classification to 13 granular agricultural intents.
-
-### Key Tasks for Phase 3:
-1. **Conversational State Machine:**
-   - Multi-turn state management backed by the `conversation_sessions` table.
-   - Detect missing farmer information (`planting_date`, `npk_values`, `planting_season`, `soil_type`).
-2. **Missing Field Elicitation Strategy:**
-   - Answer the farmer's immediate query first.
-   - Follow up with at most one targeted question per turn to elicit the highest-priority missing parameter.
-   - Validate and store the response with `VerificationStatus.UNVERIFIED`.
-3. **Expanded Message Classifier (13 Categories):**
-   - Expand classifier heuristics/rules to cover granular agricultural intents.
-4. **Context-Enriched System Prompts:**
-   - Dynamically inject farmer multi-plot crop and soil profile into LLM system prompts.
+1. **Conversational Memory & State Tracking:**
+   - Designed and migrated `conversation_messages`, `outbox_messages`, and `field_history` via Alembic migration `c48a7391b05e`.
+   - Built `ConversationManager` and `ConversationRepository` providing multi-turn dialog tracking, inactivity session timeouts, formatted dialog injection into prompt context, and strict cross-farmer context isolation.
+2. **Missing Farm Information Detection & Follow-Up UX:**
+   - Built `FollowupEngine` to audit 10 agronomic parameters across 5 verification states (`VERIFIED`, `UNVERIFIED`, `MISSING`, `NOT_PROVIDED`, `UNKNOWN`, `PENDING_CONFIRMATION`).
+   - Prioritized elicitation ordering: `crop` -> `planting_date` -> `planting_season` -> `cultivated_area` -> `crop_variety` -> `soil_type` -> `irrigation_type` -> `npk_information` -> `village`.
+   - Strictly protected `VERIFIED` attributes from AI overwrites; updated unverified values with `WHATSAPP_CHAT` provenance.
+   - Polite follow-up UX: at most 1 question per turn, duplicate question avoidance, multilingual localized generation in Marathi, Hindi, and English.
+3. **13-Intent Agricultural Intent Taxonomy:**
+   - Granular intent classification across 13 distinct agronomic domains.
+   - 100% backward compatibility to legacy `MessageCategory` via `INTENT_TO_LEGACY_CATEGORY`.
+   - Comprehensive Marathi, Hindi, English, and transliterated keyword regexes.
+   - Multilingual entity extraction (crop, area, unit, variety, drip irrigation, planting season, ratoon).
+4. **Phase 2 Handoff Improvements Implemented:**
+   - **Transactional Outbox Pattern:** Outbound messages durably enqueued in `outbox_messages` before HTTP dispatch, preventing duplicate deliveries or lost messages.
+   - **Field History Audit Trail:** Dedicated temporal audit table `field_history` capturing old and new values with actor attribution, ignoring identical no-op writes.
 
 ---
 
-## 7. Explicit Stop Instruction
+## 7. Scope & Instructions for Phase 4: Multilingual Speech & Computer Vision Intelligence
+
+### Objective of Phase 4
+Extend KrishiBot to handle multimodal farmer interactions:
+1. **Multilingual Speech-to-Text (STT):**
+   - Transcribe Marathi, Hindi, and Marathlish voice notes received via WhatsApp audio attachments into text queries.
+2. **Computer Vision (Crop Disease Diagnosis):**
+   - Ingest farmer leaf/crop photos from WhatsApp media payloads, detect visual disease patterns (e.g., sugarcane rust, bollworm damage, fungal blights), and fuse image diagnostics with RAG advisories.
+3. **Multimodal Media Ingestion:**
+   - WhatsApp webhook media download, local secure caching, and metadata linking.
+
+---
+
+## 8. Explicit Stop Instruction
 
 In strict adherence to the project instructions:
-- **Phase 2 and its Final Data Integrity Audit are complete.**
-- **All code, tests, and canonical documentation have been updated, committed, and pushed.**
-- **Do not execute Phase 3 automatically.**
-- **Await user review and explicit approval before starting Phase 3.**
+- **Phase 3 and all 18 conversation tests are complete.**
+- **All regression test suites (148 tests across 6 suites) are 100% passing.**
+- **All canonical documentation has been updated.**
+- **Do not execute Phase 4 automatically.**
+- **Await user review and explicit approval before starting Phase 4.**
+

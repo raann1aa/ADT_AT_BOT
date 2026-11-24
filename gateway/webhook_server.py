@@ -38,6 +38,8 @@ app = FastAPI(
 )
 
 from database.services.deduplication_service import DeduplicationService
+from database.services.outbox_service import OutboxService
+from database.services.farmer_service import FarmerService
 
 # Shared Core Singletons
 excel_manager = ExcelProfileManager()
@@ -46,6 +48,8 @@ whatsapp_client = WhatsAppCloudClient()
 farmer_agent = FarmerAgent(default_form_link="https://forms.gle/WeeklyFarmerSurvey")
 form_broadcaster = FormBroadcaster(whatsapp_client=whatsapp_client)
 audit_logger = AuditLogger(max_history=500)
+outbox_service = OutboxService(whatsapp_client=whatsapp_client)
+farmer_service = FarmerService()
 
 # Persistent database-backed message deduplication service
 dedup_service = DeduplicationService()
@@ -75,9 +79,31 @@ def process_message_background(msg: IncomingWebhookMessage):
     group_name = group_info.group_name if group_info else "General Farmer Group"
 
     try:
-        # 1. Look up Farmer Profile in Excel database by phone number
+        # 1. Look up Farmer Profile in Database & Excel
+        db_farmer = None
+        try:
+            db_farmer = farmer_service.get_farmer_by_phone(msg.sender_phone)
+        except Exception:
+            pass
+
         registered_farmer = excel_manager.lookup_farmer(msg.sender_phone)
-        if registered_farmer:
+
+        if db_farmer:
+            plot = db_farmer.plots[0] if (db_farmer.plots and len(db_farmer.plots) > 0) else None
+            crop = plot.crops[0] if (plot and plot.crops and len(plot.crops) > 0) else None
+            soil = plot.soil_profiles[0] if (plot and plot.soil_profiles and len(plot.soil_profiles) > 0) else None
+            profile = FarmerProfile(
+                name=db_farmer.full_name,
+                phone=db_farmer.primary_phone,
+                district=db_farmer.district.name if db_farmer.district else "General",
+                crop=crop.crop_name if crop else "General",
+                soil_type=soil.soil_type if soil else "Loam",
+                farm_size=f"{plot.land_area} Acres" if plot else "3 Acres",
+                farmer_id=db_farmer.id,
+                preferred_language=db_farmer.preferred_language or "mr"
+            )
+            logger.info(f"✅ Recognized Farmer from DB: {db_farmer.full_name} (#{db_farmer.farmer_id})")
+        elif registered_farmer:
             logger.info(f"✅ Recognized Farmer from Excel: {registered_farmer.farmer_name} ({registered_farmer.district}, Crop: {registered_farmer.crop_grown})")
             profile = FarmerProfile(
                 name=registered_farmer.farmer_name,
@@ -106,15 +132,23 @@ def process_message_background(msg: IncomingWebhookMessage):
             profile=profile
         )
 
-        # 3. Dispatch Reply if actionable
+        # 3. Dispatch Reply via Transactional Outbox (Durable Queuing + Dispatch)
         if response.reply_text:
             if whatsapp_client.is_live:
                 recipient = msg.sender_phone
             else:
                 recipient = group_id if (group_id and group_id.startswith("group_")) else msg.sender_phone
-            whatsapp_client.send_message(to=recipient, message_text=response.reply_text)
+
+            # Persist in transactional outbox first
+            outbox_id = outbox_service.enqueue(
+                recipient_phone=recipient,
+                message_text=response.reply_text,
+                idempotency_key=f"out_{msg.message_id}"
+            )
+            # Dispatch to external Meta WhatsApp client
+            outbox_service.process_pending(client=whatsapp_client)
             masked_recipient = f"******{recipient[-4:]}" if (recipient and recipient.isdigit() and len(recipient) >= 4) else recipient
-            logger.info(f"Dispatched reply to {masked_recipient} (Status: {response.status})")
+            logger.info(f"Dispatched outbox {outbox_id} to {masked_recipient} (Status: {response.status})")
         else:
             logger.info(f"🔕 Message from {msg.sender_name} was silently ignored: {response.reason}")
 

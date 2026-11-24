@@ -8,11 +8,17 @@ from .cdo_repository import CDORepository
 from .issue_repository import IssueRepository
 from .audit_repository import AuditRepository
 from .idempotency_repository import IdempotencyRepository
+from .outbox_repository import OutboxRepository
+from .field_history_repository import FieldHistoryRepository
+from .conversation_repository import ConversationRepository
 
 __all__ = [
     "FarmerRepository",
     "CDORepository",
     "IssueRepository",
     "AuditRepository",
-    "IdempotencyRepository"
+    "IdempotencyRepository",
+    "OutboxRepository",
+    "FieldHistoryRepository",
+    "ConversationRepository"
 ]

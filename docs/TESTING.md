@@ -255,3 +255,35 @@ Tested live Uvicorn startup and HTTP binding on `http://127.0.0.1:8000/`:
 | **Section 2** | Webhook Processing Reliability | 8 | 8/8 (100%) | Exactly one worker claims concurrent incoming message; persistent DB ledger blocks duplicates post server restart; stale `PROCESSING` event (>300s) reclaimed; fresh `PROCESSING` (<300s) not reclaimed; `FAILED` blocked by default but retryable with `allow_failed_retry=True`; `COMPLETED` never reprocessed; external WhatsApp delivery limitation documented (Transactional Outbox required for Phase 3). |
 | **Section 3** | Field-Level Verification | 6 | 6/6 (100%) | Farmer model has per-field statuses (`name_status`, `village_status`, `tehsil_status`); CropRecord has 5 granular statuses; SoilProfile has 3 granular statuses; FarmPlot has 2 per-field statuses; updating one field status leaves all other fields intact; documented gap of missing `field_history` temporal table. |
 | **Section 4** | Farmer Identity | 6 | 6/6 (100%) | `farmer_id` is stable business identity; changing phone number preserves `farmer_id` and DB PK; multiple farmers can share a phone via `FarmerContact`; duplicate primary phone rejected by unique constraint; `lookup_all_by_phone` returns all matches to eliminate arbitrary `.first()` selection; `generate_next_farmer_id` produces unique `FARM-XXXXX` sequence. |
+
+---
+
+## 9. Phase 3 Central AI Agent & Conversation Automation Test Results
+
+### 9.1 Test Suite Overview (`scripts/test_phase_3_conversation.py`)
+- **Execution Command:** `python scripts/test_phase_3_conversation.py`
+- **Total Tests Executed:** 18
+- **Pass Rate:** **18/18 PASSED (100.0%)**
+- **Test Database Engine:** In-memory SQLite (`sqlite:///:memory:`) using isolated fixtures.
+
+### 9.2 Breakdown of Verified Scenarios
+
+| Section | Target Area | Tests | Result | Verified Behaviors |
+|---|---|:---:|:---:|---|
+| **Section 1** | Conversational Memory & State Tracking | 3 | 3/3 (100%) | Session persistence across requests; multi-turn dialog recording and formatted prompt history retrieval; strict farmer isolation preventing cross-farmer context contamination. |
+| **Section 2** | Multi-Turn Conversation Management | 2 | 2/2 (100%) | Dialog state machine transition to `AWAITING_FIELD_INPUT`; graceful handling of unrelated messages without state corruption. |
+| **Section 3** | Missing Farm Information Detection | 3 | 3/3 (100%) | Categorization across `VERIFIED`, `UNVERIFIED`, and `MISSING` statuses; strict immunity of `VERIFIED` fields from AI overwrites; safe updating of unverified fields with `WHATSAPP_CHAT` provenance. |
+| **Section 4** | Intelligent Follow-Up Automation | 2 | 2/2 (100%) | Prioritized field selection and duplicate question prevention; multilingual follow-up question generation in Marathi, Hindi, and English. |
+| **Section 5** | 13-Intent Granular Agricultural Classification | 3 | 3/3 (100%) | Accurate classification across all 13 agricultural intents with 100% legacy backward mapping; multilingual entity extraction (crop, area, variety, drip); ambiguous query low-confidence / clarification triggering. |
+| **Section 6** | Transactional Outbox Pattern | 3 | 3/3 (100%) | Durable message enqueue and simulated external dispatch; retry count tracking with transition to `FAILED` on exhaustion; outbound idempotency key deduplication. |
+| **Section 7** | Field History Audit Trail | 2 | 2/2 (100%) | Explicit old-to-new value audit logging with actor attribution; skipped audit entry creation on identical unchanged values. |
+
+### 9.3 Full Regression Suite Verification
+All existing test suites were executed sequentially and verified with 100% pass rates:
+1. `scripts/test_phase_3_conversation.py`: **18/18 PASSED (100%)**
+2. `scripts/test_phase_2_database.py`: **62/62 PASSED (100%)**
+3. `scripts/test_phase_2_final_verification.py`: **27/27 PASSED (100%)**
+4. `scripts/test_phase_b.py`: **21/21 PASSED (100%)**
+5. `scripts/test_retrieval.py`: **12/12 PASSED (100%)**
+6. `scripts/test_webhook_flow.py`: **8/8 PASSED (100%)**
+

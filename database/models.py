@@ -16,7 +16,8 @@ from sqlalchemy.orm import relationship
 from .connection import Base
 from .enums import (
     VerificationStatus, PlantingSeason, AreaUnit,
-    IssuePriority, IssueStatus, TaskTargetRole, TaskStatus, WebhookEventStatus
+    IssuePriority, IssueStatus, TaskTargetRole, TaskStatus, WebhookEventStatus,
+    OutboxMessageStatus, ConversationState, AgriculturalIntent
 )
 
 
@@ -345,9 +346,32 @@ class ConversationSession(Base):
 
     # Relationships
     farmer = relationship("Farmer", back_populates="conversation_sessions")
+    messages = relationship("ConversationMessage", back_populates="session", cascade="all, delete-orphan", order_by="ConversationMessage.id")
 
     def __repr__(self):
         return f"<ConversationSession(session_id='{self.session_id}', phone='{self.phone_number}', state='{self.current_state}')>"
+
+
+class ConversationMessage(Base):
+    """
+    Individual turn within a farmer conversational session.
+    Persists dialog turns for multi-turn contextual retrieval and auditability.
+    """
+    __tablename__ = "conversation_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(Integer, ForeignKey("conversation_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender_role = Column(String(50), nullable=False)  # 'farmer', 'assistant', 'system'
+    message_text = Column(Text, nullable=False)
+    intent = Column(String(100), nullable=True, index=True)
+    entities = Column(Text, nullable=True)             # JSON-encoded dictionary of extracted entities
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # Relationships
+    session = relationship("ConversationSession", back_populates="messages")
+
+    def __repr__(self):
+        return f"<ConversationMessage(id={self.id}, session_id={self.session_id}, role='{self.sender_role}')>"
 
 
 # ---------------------------------------------------------------------------
@@ -469,3 +493,53 @@ class AuditLog(Base):
 
     def __repr__(self):
         return f"<AuditLog(log_id='{self.log_id}', category='{self.category}', action='{self.action}')>"
+
+
+# ---------------------------------------------------------------------------
+# 8. Transactional Outbox & Field Change History (Phase 3)
+# ---------------------------------------------------------------------------
+
+class OutboxMessage(Base):
+    """
+    Transactional Outbox ledger for durable asynchronous WhatsApp message dispatch.
+    Decouples database transaction commit from external Meta Graph API calls,
+    preventing duplicate messages or lost dispatches during transient failures.
+    """
+    __tablename__ = "outbox_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    outbox_id = Column(String(100), nullable=False, unique=True, index=True)
+    recipient_phone = Column(String(20), nullable=False, index=True)
+    message_text = Column(Text, nullable=False)
+    status = Column(SQLEnum(OutboxMessageStatus, native_enum=False), default=OutboxMessageStatus.PENDING, nullable=False, index=True)
+    retry_count = Column(Integer, default=0, nullable=False)
+    max_retries = Column(Integer, default=3, nullable=False)
+    last_error = Column(Text, nullable=True)
+    idempotency_key = Column(String(100), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    dispatched_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self):
+        return f"<OutboxMessage(id='{self.outbox_id}', to='{self.recipient_phone}', status='{self.status.value}')>"
+
+
+class FieldHistory(Base):
+    """
+    Temporal audit ledger tracking historical modifications to farmer and agronomic attributes.
+    Preserves old vs new values, source attribution, and change timestamps.
+    """
+    __tablename__ = "field_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String(50), nullable=False, index=True)   # e.g., 'Farmer', 'FarmPlot', 'CropRecord', 'SoilProfile'
+    entity_id = Column(Integer, nullable=False, index=True)
+    field_name = Column(String(100), nullable=False, index=True)
+    old_value = Column(Text, nullable=True)
+    new_value = Column(Text, nullable=True)
+    changed_by = Column(String(100), default="SYSTEM", nullable=False)
+    change_source = Column(String(100), default="WHATSAPP_CHAT", nullable=False)
+    changed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<FieldHistory(entity='{self.entity_type}#{self.entity_id}', field='{self.field_name}', by='{self.changed_by}')>"
+

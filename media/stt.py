@@ -51,6 +51,7 @@ class TranscriptionResult:
     model_used: Optional[str] = None
     audio_duration_sec: Optional[float] = None
     warnings: list = field(default_factory=list)
+    retryable: bool = False
 
 
 class SpeechToTextService:
@@ -182,6 +183,7 @@ Respond ONLY in this exact JSON format (no markdown, no extra text):
                 "GEMINI_API_KEY not configured. Voice note received but transcription is unavailable. "
                 "Please send your query as a text message."
             ),
+            retryable=True,
         )
 
     # ------------------------------------------------------------------
@@ -221,12 +223,37 @@ Respond ONLY in this exact JSON format (no markdown, no extra text):
                 )
 
             data = json.loads(raw_text)
-            transcription = data.get("transcription", "").strip()
-            confidence = float(data.get("confidence", 0.0))
-            detected_lang = data.get("detected_language", "unknown")
-            is_unclear = bool(data.get("is_unclear", False)) or "[unclear]" in transcription
-            is_mixed = bool(data.get("is_mixed_language", False))
-            warnings = data.get("warnings", [])
+            if not isinstance(data, dict):
+                raise ValueError("Gemini returned a non-object transcription response.")
+            required_fields = {
+                "transcription",
+                "detected_language",
+                "confidence",
+                "is_unclear",
+                "is_mixed_language",
+                "warnings",
+            }
+            if not required_fields.issubset(data):
+                raise ValueError("Gemini returned an incomplete transcription response.")
+            if not isinstance(data["transcription"], str):
+                raise ValueError("Gemini returned malformed transcription text.")
+            transcription = data["transcription"].strip()
+            confidence_value = data["confidence"]
+            if isinstance(confidence_value, bool) or not isinstance(confidence_value, (int, float)):
+                raise ValueError("Gemini returned malformed transcription confidence.")
+            confidence = float(confidence_value)
+            detected_lang = data["detected_language"]
+            if not transcription or detected_lang not in self.SUPPORTED_LANGUAGES:
+                raise ValueError("Gemini returned an incomplete transcription response.")
+            if not 0.0 <= confidence <= 1.0:
+                raise ValueError("Gemini returned confidence outside the 0.0-1.0 range.")
+            if not isinstance(data["is_unclear"], bool) or not isinstance(data["is_mixed_language"], bool):
+                raise ValueError("Gemini returned malformed transcription flags.")
+            is_unclear = data["is_unclear"] or "[unclear]" in transcription
+            is_mixed = data["is_mixed_language"]
+            warnings = data["warnings"]
+            if not isinstance(warnings, list) or not all(isinstance(item, str) for item in warnings):
+                raise ValueError("Gemini returned malformed transcription warnings.")
 
             logger.info(
                 f"SpeechToTextService: Transcribed {path.name} -> lang={detected_lang}, "
@@ -257,6 +284,7 @@ Respond ONLY in this exact JSON format (no markdown, no extra text):
                 model_used=self._model_name,
                 audio_duration_sec=duration_sec,
                 error_message=f"Gemini API error: {e}",
+                retryable=True,
             )
 
     # ------------------------------------------------------------------

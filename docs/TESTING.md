@@ -321,3 +321,43 @@ All existing test suites were executed sequentially and verified with 100% pass 
 | 7 | `scripts/test_webhook_flow.py` | Gateway, Webhook Handshake, Outbox, Resilience | 8 | ✅ **8/8 PASSED (100%)** |
 | **TOTAL** | **All 7 Automated Test Suites** | **Complete System Regression & Verification** | **186** | ✅ **186/186 PASSED (100.0%)** |
 
+---
+
+## 11. Phase 4 Post-Implementation Stabilization
+
+### 11.1 Required Suite Results
+
+| Suite | Command | Result |
+|---|---|---:|
+| Phase 4 multimodal | `python -X utf8 scripts/test_phase_4_multimodal.py` | 38/38 passed |
+| Phase 4 stabilization | `python scripts/test_phase_4_stabilization.py` | 18/18 passed |
+| Phase 3 conversation | `python scripts/test_phase_3_conversation.py` | 18/18 passed |
+| Phase 2 database | `python scripts/test_phase_2_database.py` | 62/62 passed |
+| Phase 2 final verification | `python scripts/test_phase_2_final_verification.py` | 27/27 passed |
+| Phase B classifier/E2E | `python scripts/test_phase_b.py` | 21/21 passed |
+| Retrieval | `python scripts/test_retrieval.py` | 12/12 passed |
+| Webhook flow | `python scripts/test_webhook_flow.py` | 8/8 passed |
+| **Total including stabilization** |  | **204/204 passed** |
+
+The required Phase 3, Phase 2, Phase B, retrieval, and webhook suites passed in the stabilization run. After an additional retry-resumption test was added, the Phase 4 multimodal and stabilization suites were rerun successfully (38/38 and 18/18). The first Phase 4 invocation used the Windows CP1252 console and failed while printing a checkmark after the first test body ran; `-X utf8` resolved the console encoding issue, after which all tests passed.
+
+### 11.2 What Was Mocked Versus Executed
+
+- **Unit tests with mocks:** Gemini transcription/vision provider responses, Meta media metadata/download responses, and provider error cases.
+- **Local execution:** validation, temporary-file handling, and OpenCV frame extraction where identified in the Phase 4 suite output.
+- **HTTP/API integration with mocked responses:** no live third-party HTTP integration was performed; tests use mocks/fixtures.
+- **Actual Gemini API calls:** not performed; `GEMINI_API_KEY` was unset.
+- **Actual Meta WhatsApp media-download calls:** not performed; `WHATSAPP_TOKEN` was unset.
+
+Live provider verification remains **PENDING**. Passing mocks do not establish live API behavior.
+
+### 11.3 Migration and Test-Data Safety
+
+Migration `d9f2a3b1c4e0` was tested against a disposable copy of a populated Phase 3 database. The source copy reported the older revision `fd75e8e4759e`; only the copy was stamped to `c48a7391b05e` before upgrade. Seven farmer records and a seeded conversation session/message survived; media tables, foreign keys, indexes, SQLite integrity, and the Alembic head were verified. The real database was not downgraded or stamped.
+
+The test webhook script now uses an in-memory database and temporary workbook/backup location. The audit restored the test-updated workbook and Chroma runtime/index files to the Phase 3 baseline. In the relational database, test-only timestamps and one fixture webhook event were reverted while retaining the intentional empty Phase 4 media tables. Farmer identity fields and the 193 logical RAG records remained unchanged.
+
+### 11.4 Secret and Personal-Data Scan
+
+The earlier secret-scan command and its output were unavailable, so its exit code `1` could not be classified. A fresh local regex scan checked 3,490 added historical Phase 3→4 text lines and 1,109 added staged corrective text lines: zero high-confidence credential matches and zero email-pattern matches. Phone-shaped literals occurred only in test fixtures (26 historical, 5 stabilization); none occurred in changed application code or documentation. No dedicated secret-scanner executable was available. Binary workbook and Chroma data were restored to Phase 3 baseline; the corrected database retains only the intentional empty Phase 4 tables in addition to baseline Phase 3 data.
+

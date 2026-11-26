@@ -41,7 +41,7 @@ class VideoAnalysisResult:
     """Consolidated result from multi-frame video analysis."""
     success: bool
     media_id: str
-    farmer_id: int
+    farmer_id: Optional[int]
     duration_sec: Optional[float]
     frames_extracted: int
     frames_analysed: int
@@ -51,6 +51,7 @@ class VideoAnalysisResult:
     overall_condition: str = "NORMAL"
     recommended_action: str = "ANSWER"
     error_message: Optional[str] = None
+    retryable: bool = False
 
 
 class VideoAnalysisService:
@@ -68,9 +69,10 @@ class VideoAnalysisService:
     def analyse_video(
         self,
         video_path: str,
-        media_record_id: int,
+        media_record_id: Optional[int],
         media_id: str,
-        farmer_id: int,
+        farmer_id: Optional[int],
+        persist_observations: bool = True,
     ) -> VideoAnalysisResult:
         """
         Process a video file and return consolidated visual analysis.
@@ -147,26 +149,33 @@ class VideoAnalysisService:
 
         # Analyse each extracted frame
         frame_results = []
-        for idx, (fp, ts) in enumerate(extracted_paths):
-            result = self._vision.analyse_image(
-                image_path=str(fp),
-                media_record_id=media_record_id,
-                media_id=f"{media_id}_frame_{idx}",
-                farmer_id=farmer_id,
-                frame_index=idx,
-                frame_timestamp_sec=ts,
-            )
-            frame_results.append(result)
-            # Clean up frame temp file
-            fp.unlink(missing_ok=True)
-
-        # Clean up temp dir
         try:
+            for idx, (fp, ts) in enumerate(extracted_paths):
+                result = self._vision.analyse_image(
+                    image_path=str(fp),
+                    media_record_id=media_record_id,
+                    media_id=f"{media_id}_frame_{idx}",
+                    farmer_id=farmer_id,
+                    frame_index=idx,
+                    frame_timestamp_sec=ts,
+                    persist_observation=persist_observations,
+                )
+                frame_results.append(result)
+        finally:
+            for frame_path, _ in extracted_paths:
+                frame_path.unlink(missing_ok=True)
             frame_dir.rmdir()
-        except Exception:
-            pass
 
         # Consolidate observations
+        successful_results = [result for result in frame_results if result.success]
+        if not successful_results:
+            return self._failed(
+                media_id,
+                farmer_id,
+                "No video frames could be analysed successfully.",
+                retryable=any(result.retryable for result in frame_results),
+            )
+
         consolidated = self._consolidate(frame_results)
         return VideoAnalysisResult(
             success=True,
@@ -270,7 +279,12 @@ class VideoAnalysisService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _failed(media_id: str, farmer_id: int, msg: str) -> VideoAnalysisResult:
+    def _failed(
+        media_id: str,
+        farmer_id: Optional[int],
+        msg: str,
+        retryable: bool = False,
+    ) -> VideoAnalysisResult:
         return VideoAnalysisResult(
             success=False,
             media_id=media_id,
@@ -279,4 +293,5 @@ class VideoAnalysisService:
             frames_extracted=0,
             frames_analysed=0,
             error_message=msg,
+            retryable=retryable,
         )

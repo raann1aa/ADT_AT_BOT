@@ -328,3 +328,20 @@ Farmers frequently send short video clips walking through sugarcane or cotton fi
 ### Rationale
 - Keeps analysis latency low, minimizes API token consumption, and prevents spurious multiplication of disease severity.
 
+---
+
+## ADR-018: Explicit Transient Media, Retry Lifecycle, and Fallback Delivery (Phase 4 Stabilization)
+
+### Context
+The Phase 4 review found that unregistered-farmer media could be skipped, unsuccessful provider results could be mistaken for successful processing, incomplete downloads did not resume, and useful fallback replies could be filtered out when the orchestrator returned `IGNORED`.
+
+### Decision
+1. Analyze unregistered-farmer media from temporary local storage with no fabricated farmer/media IDs and no media or visual-observation persistence. Mark this mode explicitly as `TRANSIENT` and clean up downloaded files after processing.
+2. Allow only successful analysis to transition a persisted record to `PROCESSED`. Keep retryable failures `PENDING` until retry exhaustion; persist permanent validation failures as `FAILED`; use an atomic processing claim to avoid duplicate analysis.
+3. Resume a pending record with no stored media file by reclaiming it and retrying download. Do not reclaim completed or terminal records.
+4. Queue useful fallback text through the transactional Outbox regardless of `IGNORED` status, retaining the existing idempotency key.
+5. Keep integration claims bounded: mocked provider tests are not live Gemini or Meta verification.
+
+### Rationale
+This preserves farmer identity and foreign-key boundaries, makes retry and terminal states observable, prevents false success and duplicate processing, and ensures that useful responses retain transactional/idempotent delivery semantics.
+

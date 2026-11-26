@@ -5,12 +5,28 @@ Usage:
     python scripts/test_webhook_flow.py
 """
 
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 # Add project root to sys.path
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
+
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+
+_TEST_DATA_DIRECTORY = tempfile.TemporaryDirectory(prefix="krishibot_webhook_test_")
+_TEST_DATA_PATH = Path(_TEST_DATA_DIRECTORY.name)
+_TEST_EXCEL_PATH = _TEST_DATA_PATH / "farmer_profiles.xlsx"
+shutil.copy2(BASE_DIR / "data" / "farmer_profiles.xlsx", _TEST_EXCEL_PATH)
+
+from form_automation import excel_manager as excel_manager_module
+from database.services import excel_migration_service as excel_migration_module
+
+excel_manager_module.DEFAULT_EXCEL_PATH = _TEST_EXCEL_PATH
+excel_migration_module.DEFAULT_BACKUP_DIR = _TEST_DATA_PATH / "backups"
 
 from fastapi.testclient import TestClient
 from gateway.webhook_server import app, DEFAULT_VERIFY_TOKEN

@@ -16,11 +16,14 @@ import uuid
 import logging
 import hashlib
 import time
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Iterator
 
 import httpx
+from sqlalchemy.exc import IntegrityError
 
 from database.connection import get_db_session
 from database.models import MediaRecord, Farmer
@@ -73,6 +76,14 @@ class MediaIngestionError(Exception):
     pass
 
 
+class MediaValidationError(MediaIngestionError):
+    """Raised for invalid or permanently unusable media."""
+
+
+class MediaRetryableError(MediaIngestionError):
+    """Raised for temporary configuration, provider, or network failures."""
+
+
 class MediaIngestionService:
     """
     Handles all media lifecycle from WhatsApp API download through local storage
@@ -100,6 +111,8 @@ class MediaIngestionService:
         farmer_db_id: int,
         session_id: Optional[int],
         caption_text: Optional[str] = None,
+        media_type_hint: Optional[MediaType] = None,
+        mime_type_hint: Optional[str] = None,
     ) -> MediaRecord:
         """
         Download, validate, store, and register a WhatsApp media attachment.
@@ -116,38 +129,103 @@ class MediaIngestionService:
         Raises:
             MediaIngestionError on validation or download failure.
         """
-        # Idempotency guard: return existing record if already ingested
+        # Reuse completed records; reclaim incomplete pending downloads for retry.
         with get_db_session() as session:
             existing = session.query(MediaRecord).filter_by(media_id=wa_media_id).first()
-            if existing:
+            if existing and (
+                existing.status != MediaProcessingStatus.PENDING or existing.file_path
+            ):
                 logger.info(f"MediaIngestionService: Duplicate media {wa_media_id} — returning existing record.")
                 return existing
 
-        # Phase 1: Resolve media URL from Meta API
-        media_url, mime_type, file_size = self._resolve_media_url(wa_media_id)
+        if existing:
+            if not self.mark_processing(wa_media_id):
+                existing = self.get_record(wa_media_id)
+                if existing is None:
+                    raise MediaIngestionError(f"Media record {wa_media_id} disappeared during retry.")
+                return existing
+            record = self.get_record(wa_media_id)
+            if record is None:
+                raise MediaIngestionError(f"Media record {wa_media_id} disappeared during retry.")
+        else:
+            # Claim this media ID before network work so concurrent deliveries cannot process it twice.
+            try:
+                record = self._create_record(
+                    wa_media_id=wa_media_id,
+                    farmer_db_id=farmer_db_id,
+                    session_id=session_id,
+                    media_type=media_type_hint or MediaType.DOCUMENT,
+                    mime_type=mime_type_hint or "application/octet-stream",
+                    file_path=None,
+                    file_size_bytes=0,
+                    source_url=None,
+                    caption_text=caption_text,
+                    status=MediaProcessingStatus.PROCESSING,
+                )
+            except IntegrityError:
+                existing = self.get_record(wa_media_id)
+                if existing:
+                    logger.info("MediaIngestionService: Concurrent duplicate %s skipped.", wa_media_id)
+                    return existing
+                raise
 
-        # Phase 2: Validate MIME type and size
+        try:
+            media_url, mime_type, file_size = self._resolve_media_url(wa_media_id)
+            media_type = self._validate_mime(mime_type)
+            self._validate_size(file_size, media_type, wa_media_id)
+            file_path = self._download_media(wa_media_id, media_url, mime_type, media_type)
+            actual_size = file_path.stat().st_size
+            with get_db_session() as session:
+                stored = session.query(MediaRecord).filter_by(media_id=wa_media_id).one()
+                stored.media_type = media_type
+                stored.mime_type = mime_type
+                stored.file_path = str(file_path)
+                stored.file_size_bytes = actual_size
+                stored.source_url = media_url
+                stored.status = MediaProcessingStatus.PENDING
+                stored.error_message = None
+                session.commit()
+            record.media_type = media_type
+            record.mime_type = mime_type
+            record.file_path = str(file_path)
+            record.file_size_bytes = actual_size
+            record.source_url = media_url
+            record.status = MediaProcessingStatus.PENDING
+        except MediaIngestionError as error:
+            self.mark_failed(
+                wa_media_id,
+                str(error),
+                retryable=isinstance(error, MediaRetryableError),
+            )
+            raise
+        except Exception as error:
+            wrapped = MediaRetryableError(f"Media download failed for {wa_media_id}: {error}")
+            self.mark_failed(wa_media_id, str(wrapped), retryable=True)
+            raise wrapped from error
+
+        logger.info(f"MediaIngestionService: Ingested {media_type.value} {wa_media_id} -> {file_path.name} ({actual_size} bytes).")
+        return record
+
+    @contextmanager
+    def transient_media(self, wa_media_id: str) -> Iterator[Tuple[Path, MediaType]]:
+        """Download media to a temporary directory without creating database records."""
+        if not self._whatsapp_token:
+            raise MediaRetryableError("WHATSAPP_TOKEN not configured; media download is unavailable.")
+
+        media_url, mime_type, file_size = self._resolve_media_url(wa_media_id)
         media_type = self._validate_mime(mime_type)
         self._validate_size(file_size, media_type, wa_media_id)
 
-        # Phase 3: Download to local storage
-        file_path = self._download_media(wa_media_id, media_url, mime_type, media_type)
-        actual_size = file_path.stat().st_size
-
-        # Phase 4: Register in database
-        record = self._create_record(
-            wa_media_id=wa_media_id,
-            farmer_db_id=farmer_db_id,
-            session_id=session_id,
-            media_type=media_type,
-            mime_type=mime_type,
-            file_path=str(file_path),
-            file_size_bytes=actual_size,
-            source_url=media_url,
-            caption_text=caption_text,
-        )
-        logger.info(f"MediaIngestionService: Ingested {media_type.value} {wa_media_id} -> {file_path.name} ({actual_size} bytes).")
-        return record
+        with tempfile.TemporaryDirectory(prefix="krishibot_transient_") as temp_dir:
+            file_path = self._download_media(
+                wa_media_id,
+                media_url,
+                mime_type,
+                media_type,
+                storage_dir=Path(temp_dir),
+                cache=False,
+            )
+            yield file_path, media_type
 
     def register_synthetic_media(
         self,
@@ -181,31 +259,54 @@ class MediaIngestionService:
             caption_text=caption_text,
         )
 
-    def mark_processing(self, media_id: str) -> None:
-        """Transition a media record to PROCESSING status."""
-        self._update_status(media_id, MediaProcessingStatus.PROCESSING)
+    def mark_processing(self, media_id: str) -> bool:
+        """Atomically claim a pending record; return False for duplicate or terminal work."""
+        with get_db_session() as session:
+            claimed = (
+                session.query(MediaRecord)
+                .filter_by(media_id=media_id, status=MediaProcessingStatus.PENDING)
+                .update(
+                    {"status": MediaProcessingStatus.PROCESSING},
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            return claimed == 1
 
     def mark_processed(self, media_id: str) -> None:
         """Transition a media record to PROCESSED status and stamp processed_at."""
         with get_db_session() as session:
             rec = session.query(MediaRecord).filter_by(media_id=media_id).first()
-            if rec:
-                rec.status = MediaProcessingStatus.PROCESSED
-                rec.processed_at = datetime.utcnow()
-                session.commit()
+            if not rec:
+                raise MediaIngestionError(f"Media record {media_id} was not found.")
+            if rec.status != MediaProcessingStatus.PROCESSING:
+                raise MediaIngestionError(
+                    f"Media record {media_id} cannot be marked processed from {rec.status.value}."
+                )
+            rec.status = MediaProcessingStatus.PROCESSED
+            rec.processed_at = datetime.utcnow()
+            rec.error_message = None
+            session.commit()
 
-    def mark_failed(self, media_id: str, error_msg: str) -> None:
-        """Increment retry count and mark FAILED if retries exhausted."""
+    def mark_failed(self, media_id: str, error_msg: str, retryable: bool = True) -> None:
+        """Record a failure and retry only temporary failures within the configured limit."""
         with get_db_session() as session:
             rec = session.query(MediaRecord).filter_by(media_id=media_id).first()
-            if rec:
+            if not rec:
+                raise MediaIngestionError(f"Media record {media_id} was not found.")
+            if rec.status in (MediaProcessingStatus.PROCESSED, MediaProcessingStatus.FAILED):
+                return
+
+            rec.error_message = error_msg
+            if retryable:
                 rec.retry_count += 1
-                rec.error_message = error_msg
                 if rec.retry_count >= rec.max_retries:
                     rec.status = MediaProcessingStatus.FAILED
                 else:
                     rec.status = MediaProcessingStatus.PENDING
-                session.commit()
+            else:
+                rec.status = MediaProcessingStatus.FAILED
+            session.commit()
 
     def get_record(self, media_id: str) -> Optional[MediaRecord]:
         """Fetch media record by WhatsApp media ID."""
@@ -222,8 +323,7 @@ class MediaIngestionService:
         Returns (url, mime_type, file_size_bytes).
         """
         if not self._whatsapp_token:
-            # Offline / test mode: return placeholder
-            return (f"https://mock-api.local/media/{wa_media_id}", "audio/ogg", 0)
+            raise MediaRetryableError("WHATSAPP_TOKEN not configured; media URL resolution is unavailable.")
 
         try:
             resp = httpx.get(
@@ -238,14 +338,16 @@ class MediaIngestionService:
             mime_type = data.get("mime_type", "application/octet-stream")
             file_size = int(data.get("file_size", 0))
             if not url:
-                raise MediaIngestionError(f"Meta API returned no URL for media_id={wa_media_id}")
+                raise MediaValidationError(f"Meta API returned no URL for media_id={wa_media_id}")
             return url, mime_type, file_size
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                raise MediaIngestionError(f"Media {wa_media_id} has expired or is not found (404).")
-            raise MediaIngestionError(f"Meta API error resolving {wa_media_id}: {e}")
+                raise MediaValidationError(f"Media {wa_media_id} has expired or is not found (404).")
+            raise MediaRetryableError(f"Meta API error resolving {wa_media_id}: {e}")
+        except MediaIngestionError:
+            raise
         except Exception as e:
-            raise MediaIngestionError(f"Failed to resolve media URL for {wa_media_id}: {e}")
+            raise MediaRetryableError(f"Failed to resolve media URL for {wa_media_id}: {e}")
 
     def _validate_mime(self, mime_type: str) -> MediaType:
         """Validate MIME type and return the corresponding MediaType enum."""
@@ -254,7 +356,7 @@ class MediaIngestionService:
         for allowed_mime, media_type_enum in ALLOWED_MIME_TYPES.items():
             if bare_mime == allowed_mime.split(";")[0].strip().lower():
                 return media_type_enum
-        raise MediaIngestionError(
+        raise MediaValidationError(
             f"Unsupported MIME type '{mime_type}'. Allowed types: {list(ALLOWED_MIME_TYPES.keys())}"
         )
 
@@ -262,12 +364,18 @@ class MediaIngestionService:
         """Enforce per-type size limits."""
         limit = MAX_SIZE_BY_TYPE.get(media_type, MAX_IMAGE_SIZE)
         if file_size > 0 and file_size > limit:
-            raise MediaIngestionError(
+            raise MediaValidationError(
                 f"Media {media_id} exceeds size limit: {file_size} bytes > {limit} bytes for {media_type.value}."
             )
 
     def _download_media(
-        self, wa_media_id: str, media_url: str, mime_type: str, media_type: MediaType
+        self,
+        wa_media_id: str,
+        media_url: str,
+        mime_type: str,
+        media_type: MediaType,
+        storage_dir: Optional[Path] = None,
+        cache: bool = True,
     ) -> Path:
         """
         Download media bytes securely.
@@ -285,19 +393,20 @@ class MediaIngestionService:
         bare_mime = mime_type.split(";")[0].strip().lower()
         ext = ext_map.get(bare_mime, ".bin")
 
-        subdir = MEDIA_STORAGE_DIR / media_type.value.lower()
+        subdir = storage_dir or MEDIA_STORAGE_DIR / media_type.value.lower()
         subdir.mkdir(parents=True, exist_ok=True)
-        safe_name = f"{wa_media_id}{ext}"
+        safe_name = (
+            f"{hashlib.sha256(wa_media_id.encode('utf-8')).hexdigest()}{ext}"
+            if cache else f"{uuid.uuid4().hex}{ext}"
+        )
         file_path = subdir / safe_name
 
-        if file_path.exists():
+        if cache and file_path.exists():
             logger.info(f"MediaIngestionService: File already cached at {file_path}.")
             return file_path
 
         if not self._whatsapp_token:
-            # Offline mode: write empty file for testing
-            file_path.write_bytes(b"")
-            return file_path
+            raise MediaRetryableError("WHATSAPP_TOKEN not configured; media download is unavailable.")
 
         size_limit = MAX_SIZE_BY_TYPE.get(media_type, MAX_IMAGE_SIZE)
         downloaded = 0
@@ -315,7 +424,7 @@ class MediaIngestionService:
                         if downloaded > size_limit:
                             f.close()
                             file_path.unlink(missing_ok=True)
-                            raise MediaIngestionError(
+                            raise MediaValidationError(
                                 f"Media {wa_media_id} exceeded {size_limit} bytes during download."
                             )
                         f.write(chunk)
@@ -323,7 +432,7 @@ class MediaIngestionService:
             raise
         except Exception as e:
             file_path.unlink(missing_ok=True)
-            raise MediaIngestionError(f"Download failed for {wa_media_id}: {e}")
+            raise MediaRetryableError(f"Download failed for {wa_media_id}: {e}")
 
         return file_path
 
@@ -340,16 +449,9 @@ class MediaIngestionService:
                 file_size_bytes=kwargs.get("file_size_bytes", 0),
                 source_url=kwargs.get("source_url"),
                 caption_text=kwargs.get("caption_text"),
-                status=MediaProcessingStatus.PENDING,
+                status=kwargs.get("status", MediaProcessingStatus.PENDING),
             )
             session.add(record)
             session.commit()
             session.refresh(record)
             return record
-
-    def _update_status(self, media_id: str, status: MediaProcessingStatus) -> None:
-        with get_db_session() as session:
-            rec = session.query(MediaRecord).filter_by(media_id=media_id).first()
-            if rec:
-                rec.status = status
-                session.commit()

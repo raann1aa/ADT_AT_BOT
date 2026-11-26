@@ -65,7 +65,7 @@ class VisionResult:
     """Structured vision analysis result."""
     success: bool
     media_id: str
-    farmer_id: int
+    farmer_id: Optional[int]
     identified_crop: Optional[str]
     symptoms: List[str]
     image_quality: str
@@ -80,6 +80,7 @@ class VisionResult:
     model_used: Optional[str] = None
     error_message: Optional[str] = None
     observation_id: Optional[str] = None
+    retryable: bool = False
 
 
 class AgriculturalVisionService:
@@ -110,11 +111,12 @@ class AgriculturalVisionService:
     def analyse_image(
         self,
         image_path: str,
-        media_record_id: int,
+        media_record_id: Optional[int],
         media_id: str,
-        farmer_id: int,
+        farmer_id: Optional[int],
         frame_index: int = 0,
         frame_timestamp_sec: Optional[float] = None,
+        persist_observation: bool = True,
     ) -> VisionResult:
         """
         Analyse a crop image and persist a VisualObservation.
@@ -131,6 +133,8 @@ class AgriculturalVisionService:
             VisionResult structured analysis.
         """
         path = Path(image_path)
+        if persist_observation and media_record_id is None:
+            raise ValueError("A persisted visual observation requires a media record.")
 
         # Validation
         if not path.exists():
@@ -172,16 +176,16 @@ class AgriculturalVisionService:
                     "GEMINI_API_KEY not configured. Image received but analysis is unavailable. "
                     "Please describe your crop issue in text."
                 ),
+                retryable=True,
             )
 
-        # Persist VisualObservation if analysis succeeded or even failed (for audit)
-        obs_id = self._persist_observation(
-            result=result,
-            media_record_id=media_record_id,
-            frame_index=frame_index,
-            frame_timestamp_sec=frame_timestamp_sec,
-        )
-        result.observation_id = obs_id
+        if persist_observation:
+            result.observation_id = self._persist_observation(
+                result=result,
+                media_record_id=media_record_id,
+                frame_index=frame_index,
+                frame_timestamp_sec=frame_timestamp_sec,
+            )
         return result
 
     # ------------------------------------------------------------------
@@ -195,6 +199,8 @@ class AgriculturalVisionService:
             model = self._genai.GenerativeModel(self._model_name)
             response = model.generate_content([VISION_PROMPT, uploaded])
             raw = response.text.strip()
+            if not raw:
+                raise ValueError("Gemini returned an empty vision response.")
 
             # Strip markdown fences
             if raw.startswith("```"):
@@ -203,14 +209,68 @@ class AgriculturalVisionService:
                     raw = raw[4:].strip()
 
             data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("Gemini returned a non-object vision response.")
+            required_fields = {
+                "identified_crop",
+                "leaf_discoloration",
+                "yellowing",
+                "spots_lesions",
+                "wilting",
+                "visible_pest_damage",
+                "physical_damage",
+                "general_condition",
+                "observed_symptoms",
+                "image_quality",
+                "confidence",
+                "uncertainty_notes",
+                "additional_info_required",
+                "recommended_action",
+                "possible_diagnoses",
+            }
+            if not required_fields.issubset(data):
+                raise ValueError("Gemini returned an incomplete vision response.")
+            if data["identified_crop"] is not None and not isinstance(data["identified_crop"], str):
+                raise ValueError("Gemini returned malformed crop identification.")
 
             symptoms = data.get("observed_symptoms", [])
-            if not isinstance(symptoms, list):
-                symptoms = []
+            if not isinstance(symptoms, list) or not all(isinstance(item, str) for item in symptoms):
+                raise ValueError("Gemini returned malformed observed symptoms.")
 
             diagnoses = data.get("possible_diagnoses", [])
-            if not isinstance(diagnoses, list):
-                diagnoses = []
+            if not isinstance(diagnoses, list) or not all(isinstance(item, dict) for item in diagnoses):
+                raise ValueError("Gemini returned malformed possible diagnoses.")
+            confidence_value = data["confidence"]
+            if isinstance(confidence_value, bool) or not isinstance(confidence_value, (int, float)):
+                raise ValueError("Gemini returned malformed vision confidence.")
+            confidence = float(confidence_value)
+            if not 0.0 <= confidence <= 1.0:
+                raise ValueError("Gemini returned confidence outside the 0.0-1.0 range.")
+            for field_name in ("image_quality", "general_condition", "recommended_action"):
+                if not isinstance(data.get(field_name), str) or not data[field_name]:
+                    raise ValueError(f"Gemini returned malformed {field_name}.")
+            for field_name in (
+                "leaf_discoloration",
+                "yellowing",
+                "spots_lesions",
+                "wilting",
+                "visible_pest_damage",
+                "physical_damage",
+            ):
+                if not isinstance(data[field_name], bool):
+                    raise ValueError(f"Gemini returned malformed {field_name}.")
+            if data["image_quality"] not in {
+                "GOOD", "BLURRY", "POOR_LIGHTING", "LOW_RESOLUTION", "NON_AGRICULTURAL"
+            }:
+                raise ValueError("Gemini returned an unsupported image quality.")
+            if data["general_condition"] not in {
+                "NORMAL", "STRESSED", "SEVERE", "POOR_VISIBILITY", "UNIDENTIFIABLE"
+            }:
+                raise ValueError("Gemini returned an unsupported general condition.")
+            if data["recommended_action"] not in {
+                "ANSWER", "ESCALATE_AGRONOMIST", "REQUEST_BETTER_IMAGE", "NON_AGRICULTURAL"
+            }:
+                raise ValueError("Gemini returned an unsupported recommended action.")
 
             result = VisionResult(
                 success=True,
@@ -220,7 +280,7 @@ class AgriculturalVisionService:
                 symptoms=symptoms,
                 image_quality=data.get("image_quality", "GOOD"),
                 general_condition=data.get("general_condition", "NORMAL"),
-                confidence=float(data.get("confidence", 0.0)),
+                confidence=confidence,
                 uncertainty_notes=data.get("uncertainty_notes"),
                 additional_info_required=data.get("additional_info_required"),
                 recommended_action=data.get("recommended_action", "ANSWER"),
@@ -244,7 +304,13 @@ class AgriculturalVisionService:
 
         except Exception as e:
             logger.error(f"AgriculturalVisionService: Gemini Vision failed for {path.name}: {e}")
-            return self._failed(media_id, farmer_id, f"Gemini Vision error: {e}", provider="gemini")
+            return self._failed(
+                media_id,
+                farmer_id,
+                f"Gemini Vision error: {e}",
+                provider="gemini",
+                retryable=True,
+            )
 
     # ------------------------------------------------------------------
     # Persistence
@@ -253,7 +319,7 @@ class AgriculturalVisionService:
     def _persist_observation(
         self,
         result: VisionResult,
-        media_record_id: int,
+        media_record_id: Optional[int],
         frame_index: int,
         frame_timestamp_sec: Optional[float],
     ) -> str:
@@ -292,7 +358,13 @@ class AgriculturalVisionService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _failed(media_id: str, farmer_id: int, msg: str, provider: str = "offline") -> VisionResult:
+    def _failed(
+        media_id: str,
+        farmer_id: Optional[int],
+        msg: str,
+        provider: str = "offline",
+        retryable: bool = False,
+    ) -> VisionResult:
         return VisionResult(
             success=False,
             media_id=media_id,
@@ -308,4 +380,5 @@ class AgriculturalVisionService:
             possible_diagnoses=[],
             provider=provider,
             error_message=msg,
+            retryable=retryable,
         )

@@ -3,8 +3,8 @@
 **Project:** AI-Powered Farmer Communication and Agricultural Support Automation System  
 **Current Phase Completed:** PHASE 4 — MULTILINGUAL SPEECH & COMPUTER VISION INTELLIGENCE  
 **Target Next Phase:** PHASE 5 — CDO COORDINATION & AGRONOMIST ESCALATION  
-**Status:** COMPLETE (Awaiting User Authorization for Phase 5)  
-**Date of Audit & Release:** 2026-11-24  
+**Status:** PHASE 4 STABILIZED (Live provider verification pending; Phase 5 unauthorized)
+**Date of Audit & Release:** 2026-11-26
 
 ---
 
@@ -16,7 +16,7 @@
 | **Phase 1** | Stabilisation of the Existing Project | **COMPLETED** | Fixed HuggingFace offline loading, missing dependencies in `requirements.txt`, webhook resilience, and achieved 100% test pass rate across all suites. |
 | **Phase 2** | Database & Farmer Information Management | **COMPLETED** | Relational DB schema (PostgreSQL/SQLite), SQLAlchemy 2.0 ORM, Alembic migrations, multi-plot support, data provenance, field verification statuses, persistent deduplication, and idempotent Excel migration with backups. |
 | **Phase 3** | Central AI Agent & Conversation Automation | **COMPLETED** | Conversational memory, multi-turn state machine, missing agronomic parameter detection, intelligent polite follow-up elicitation, 13-intent agricultural classification, Marathi/Hinglish entity extraction, transactional outbox pattern, and field history audit trail. |
-| **Phase 4** | Multilingual & Multimodal Intelligence | **COMPLETED** | WhatsApp audio/voice note ingestion, Gemini STT (Marathi/Hindi/English/mixed), agricultural image intelligence (Gemini Vision with UNCONFIRMED diagnostics), video keyframing & perceptual deduplication (OpenCV), multimodal orchestration with Phase 3 integration, and `media_records`/`visual_observations` tables. |
+| **Phase 4** | Multilingual & Multimodal Intelligence | **STABILIZED** | Implementation and automated suites pass; live Gemini/Meta verification remains pending. Unregistered media is analyzed transiently, status/retry lifecycle is explicit, and fallback replies use the transactional Outbox. |
 | **Phase 5** | CDO Coordination & Agronomist Escalation | PENDING | CDO directory, factory assignment, issue tracking lifecycle, automated reminders, expert handoff. |
 | **Phase 6** | Communication Coordinator Dashboard | PENDING | Real-time monitoring UI, persistent analytics, farmer query queue, manual review controls. |
 | **Phase 7** | End-to-End Testing, Security & Pilot Deployment | PENDING | 15 integration scenarios, PII protection, rate limits, WhatsApp Cloud API live pilot verification. |
@@ -240,3 +240,13 @@
 ### Category C: Scheduled for Phases 6–7
 1. Operations Coordinator Dashboard UI overhaul (Phase 6).
 2. Live pilot deployment and security hardening (Phase 7).
+
+## 5. Phase 4 Stabilization Record
+
+- Corrected transient processing for unregistered audio, images, and video without fabricated IDs or relational persistence.
+- Corrected media lifecycle, provider/malformed-result handling, retry resumption/exhaustion, and duplicate processing claims.
+- Ensured useful media fallback replies are queued through the idempotent Outbox even when the orchestrator status is `IGNORED`.
+- Added `scripts/test_phase_4_stabilization.py` (18/18 passed). Required suites passed: Phase 4 38/38, Phase 3 18/18, Phase 2 database 62/62, Phase 2 final verification 27/27, Phase B 21/21, retrieval 12/12, and webhook flow 8/8; 204/204 total including stabilization.
+- Validated migration `d9f2a3b1c4e0` against a populated disposable Phase 3 database copy. The baseline copy's older Alembic revision was stamped only on that copy; seven farmer records and a conversation fixture survived, schema/index/FK checks passed, and the expected migration head was reached.
+- Reverted test-only changes to profile submission time, database timestamps/webhook event, and Chroma runtime artifacts. Retained the intentionally added, empty Phase 4 media tables. No farmer profile fields or RAG records were removed.
+- Gemini and Meta live tests were not performed; both required credentials were unset. Live verification remains pending. Phase 5 remains pending explicit authorization.

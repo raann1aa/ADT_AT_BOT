@@ -5,7 +5,7 @@
 **Branch:** `main`  
 **Phase Baseline:** Commit `e845a79` (Phase 3 completion)  
 **Completion Date:** 2026-11-24  
-**Status:** COMPLETE & 100% REGRESSION-VERIFIED (Awaiting Phase 5 Authorization)  
+**Status:** STABILIZED — AUTOMATED SUITES PASS; LIVE PROVIDER VERIFICATION PENDING
 
 ---
 
@@ -243,3 +243,64 @@ All automated test suites were executed sequentially. **186 out of 186 assertion
 
 > [!IMPORTANT]
 > **SIGN-OFF NOTICE:** Phase 4 is fully implemented, verified, and complete. In accordance with project instructions, **Phase 5 will NOT begin without explicit authorization from the user.**
+
+---
+
+## 16. Phase 4 Stabilization Addendum
+
+**Review baseline:** Phase 4 commit `bb3a569` against Phase 3 baseline `e845a79`.
+**Scope:** Post-implementation stabilization only. No Phase 1–4 rebuild and no Phase 5 work.
+
+### 16.1 Issues and Root Causes
+
+1. **Unregistered farmer media was not actually analyzed.** The non-persistence path retained only an audio caption; it did not download and analyze audio, images, or video. The corrected path downloads into a temporary directory, analyzes with no farmer or media database ID, and removes local files afterward. The result explicitly identifies persistence as `TRANSIENT`; no farmer ID is invented and no media or visual-observation row is written.
+2. **Media status could imply success after unavailable/failed analysis.** Provider availability and malformed responses were not consistently treated as failures; retryable download failures could leave an incomplete pending row that could not resume. Lifecycle claims are now atomic, success alone becomes `PROCESSED`, retryable failures return to `PENDING` until exhaustion, and permanent validation failures become `FAILED`. A pending record without a local file can reclaim its processing claim and resume download; completed records are not reanalyzed.
+3. **Fallback replies were dropped for `IGNORED` results.** The webhook worker filtered by status even though the orchestrator had useful fallback text. It now queues useful replies through the transactional Outbox regardless of `IGNORED`, retaining the existing idempotency key.
+
+### 16.2 Corrective Changes
+
+- `media/ingestion.py`, `media/stt.py`, `media/vision.py`, and `media/video.py`: resumable and idempotent media lifecycle, retry accounting, strict provider-result validation, and failure when no video frame succeeds.
+- `media/orchestrator.py`: transient analysis for unregistered senders, explicit persistence mode, failure-aware replies, and temporary-file cleanup.
+- `gateway/webhook_server.py`: enqueue useful fallback replies, including ignored media-only messages.
+- `scripts/test_phase_4_stabilization.py`: 18 focused cases covering transient audio/image/video, retry exhaustion and resumption, validation/provider failures, duplicate delivery, result preservation, and Outbox dispatch.
+- `scripts/test_webhook_flow.py`: isolate database and workbook writes so tests no longer mutate tracked farmer data.
+- Migration `d9f2a3b1c4e0`: removed an irrelevant no-op; migration behavior was validated on a disposable populated database copy.
+
+### 16.3 Verification Results
+
+| Suite | Result |
+|---|---:|
+| Phase 4 multimodal | 38/38 passed |
+| Phase 4 stabilization | 18/18 passed |
+| Phase 3 conversation | 18/18 passed |
+| Phase 2 database | 62/62 passed |
+| Phase 2 final verification | 27/27 passed |
+| Phase B classifier/E2E | 21/21 passed |
+| Retrieval | 12/12 passed |
+| Webhook flow | 8/8 passed |
+| **Total** | **204/204 automated test cases passed** |
+
+The plain Phase 4 test command initially failed while printing the first result because the Windows console used CP1252 and could not encode the script's status emoji. Running `python -X utf8 scripts/test_phase_4_multimodal.py` passed all 38 tests. This was an output-encoding issue, not a test failure in application behavior.
+
+### 16.4 Migration Validation
+
+The Phase 3 database copy contained Phase 3 schema but reported the older Alembic revision `fd75e8e4759e`. Only the disposable copy was stamped to the Phase 3 revision `c48a7391b05e` before upgrading to `d9f2a3b1c4e0`. Seven existing farmer records and a seeded conversation session/message survived; both media tables, their foreign keys and indexes were present; SQLite integrity was `ok`; and Alembic reported the expected head. No downgrade or migration stamp was run against the real project database.
+
+### 16.5 Committed Data and Privacy Review
+
+- `farmer_profiles.xlsx`: the sole Phase 3→4 content change was the submission-date cell for a row matching all nine non-date fields of the webhook test fixture. It was restored byte-for-byte to the Phase 3 baseline; existing rows were not removed or replaced.
+- `krishibot.db`: Phase 4's two new media tables are intentional and remain present and empty. The only other changes were four `last_updated_at` values and one webhook event matching the test fixture. Those test writes were reverted; all Phase 3 table contents now match the Phase 3 baseline. Integrity and foreign-key checks pass. Farmer identity/profile fields were not changed.
+- ChromaDB: the 193 record IDs, documents, metadata, and embedding arrays are identical to the Phase 3 baseline. The changed on-disk files were runtime/index artifacts, not changed RAG content, and the named SQLite/HNSW files were restored byte-for-byte to baseline.
+- The workbook and relational database contain farmer personal information. Values were not printed in the audit. Generated test/runtime mutations should not be committed; reviewed seed data remains tracked.
+
+### 16.6 Secret Scan and Live Provider Status
+
+The earlier secret-scan command's exact output and invocation are not available in the retained audit history. Its exit code `1` therefore cannot be attributed conclusively to a finding or to a no-match result. A fresh local regex scan covered 3,490 added lines in the historical Phase 3→4 text diff and 1,109 added lines in the staged corrective text diff: **zero high-confidence credential-pattern matches and zero email-pattern matches**. Phone-shaped literals were limited to test fixtures (26 in the existing Phase 4 test and 5 in the new stabilization test); no such patterns were found in changed application code or documentation. No dedicated secret-scanner executable was installed. Binary data was reviewed separately: the workbook/Chroma files were restored to baseline, and all Phase 3 database rows match baseline after cleanup.
+
+The provider environment check found `GEMINI_API_KEY` and `WHATSAPP_TOKEN` unset; no actual Gemini API test or Meta WhatsApp media-download test was performed. Live verification remains **PENDING**. Automated provider behavior was verified with mocks; local media parsing/OpenCV behavior ran natively where indicated in the test report.
+
+### 16.7 Remaining Limitations
+
+- Actual Gemini and Meta WhatsApp media-download integrations remain unverified pending credentials and an authorized live test.
+- FFmpeg remains unavailable on this host; supported audio formats depend on the existing native/Gemini processing paths.
+- Phase 5 remains pending explicit user authorization.

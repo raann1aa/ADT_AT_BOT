@@ -25,12 +25,22 @@ from typing import Optional, List, Dict, Any
 from agent.farmer_agent import FarmerAgent, FarmerProfile, AgentResponse
 from database.services.farmer_service import FarmerService
 from database.enums import MediaType
-from media.ingestion import MediaIngestionService, MediaIngestionError
+from media.ingestion import (
+    MediaIngestionService,
+    MediaIngestionError,
+    MediaRetryableError,
+)
 from media.stt import SpeechToTextService
 from media.vision import AgriculturalVisionService
 from media.video import VideoAnalysisService
 
 logger = logging.getLogger("MultimodalOrchestrator")
+
+
+class _MediaAnalysisError(MediaIngestionError):
+    def __init__(self, message: str, retryable: bool):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass
@@ -65,6 +75,7 @@ class MultimodalResponse:
     escalation_required: bool = False
     processing_time_ms: float = 0.0
     errors: List[str] = field(default_factory=list)
+    analysis_persistence: str = "NONE"
 
 
 MEDIA_TYPE_MAP = {
@@ -116,92 +127,84 @@ class MultimodalOrchestrator:
         farmer_profile = self._resolve_farmer_profile(request.sender_phone, request.sender_name)
         farmer_db_id = getattr(farmer_profile, "_db_id", None)
 
+        analysis_persistence = (
+            "NONE" if not request.attachments
+            else "PERSISTED" if farmer_db_id is not None
+            else "TRANSIENT"
+        )
+
         # 2. Process each attachment
         for attachment in request.attachments:
-            media_type_enum = MEDIA_TYPE_MAP.get(attachment.media_type_hint, MediaType.IMAGE)
-
-            # Guard: skip DB media record creation for unregistered farmers (None farmer_db_id).
-            # Passing 0 would violate the FK constraint on media_records.farmer_id.
-            if farmer_db_id is None:
-                logger.warning(
-                    f"MultimodalOrchestrator: Unregistered farmer {request.sender_phone}; "
-                    f"skipping DB media record for attachment {attachment.wa_media_id}. "
-                    f"STT/Vision analysis continues without DB persistence."
-                )
-                # Still attempt STT/Vision analysis in-memory for best-effort reply
-                try:
-                    if attachment.media_type_hint in ("audio", "voice_note") and attachment.caption_text:
-                        transcription_parts.append(attachment.caption_text)
-                except Exception:
-                    pass
+            media_type_enum = MEDIA_TYPE_MAP.get(attachment.media_type_hint)
+            if media_type_enum is None:
+                errors.append(f"Unsupported media type: {attachment.media_type_hint}")
                 continue
 
+            record = None
+            claimed = False
             try:
-                record = self._ingestion.ingest_media(
-                    wa_media_id=attachment.wa_media_id,
-                    farmer_db_id=farmer_db_id,
-                    session_id=None,
-                    caption_text=attachment.caption_text,
-                )
-                media_record_ids.append(record.media_id)
-                self._ingestion.mark_processing(record.media_id)
+                if farmer_db_id is None:
+                    with self._ingestion.transient_media(attachment.wa_media_id) as (file_path, actual_type):
+                        escalation_required = self._analyse_attachment(
+                            attachment=attachment,
+                            media_type=actual_type,
+                            file_path=str(file_path),
+                            media_record_id=None,
+                            farmer_db_id=None,
+                            persist_observation=False,
+                            transcription_parts=transcription_parts,
+                            visual_summaries=visual_summaries,
+                        ) or escalation_required
+                else:
+                    record = self._ingestion.ingest_media(
+                        wa_media_id=attachment.wa_media_id,
+                        farmer_db_id=farmer_db_id,
+                        session_id=None,
+                        caption_text=attachment.caption_text,
+                        media_type_hint=media_type_enum,
+                        mime_type_hint=attachment.mime_type,
+                    )
+                    if record.media_id not in media_record_ids:
+                        media_record_ids.append(record.media_id)
 
-                # Transcription path
-                if media_type_enum in (MediaType.AUDIO, MediaType.VOICE_NOTE):
-                    if record.file_path:
-                        result = self._stt.transcribe(record.file_path)
-                        if result.success and result.transcription:
-                            transcription_parts.append(result.transcription)
-                            # Store transcription back on the MediaRecord
-                            self._store_transcription(record.media_id, result)
-                            logger.info(
-                                f"MultimodalOrchestrator: Transcribed {attachment.wa_media_id} "
-                                f"({result.detected_language}, conf={result.confidence})"
-                            )
-                        else:
-                            errors.append(f"Transcription failed for {attachment.wa_media_id}: {result.error_message}")
-                    self._ingestion.mark_processed(record.media_id)
+                    if not self._ingestion.mark_processing(record.media_id):
+                        logger.info("Skipping duplicate or terminal media record %s.", record.media_id)
+                        continue
+                    claimed = True
+                    if not record.file_path:
+                        raise MediaIngestionError("The ingested media record has no local file.")
 
-                # Image analysis path
-                elif media_type_enum == MediaType.IMAGE:
-                    if record.file_path:
-                        vision_result = self._vision.analyse_image(
-                            image_path=record.file_path,
-                            media_record_id=record.id,
-                            media_id=record.media_id,
-                            farmer_id=farmer_db_id or 0,
-                        )
-                        summary = self._format_visual_summary(vision_result)
-                        if summary:
-                            visual_summaries.append(summary)
-                        if vision_result.recommended_action == "ESCALATE_AGRONOMIST":
-                            escalation_required = True
+                    escalation_required = self._analyse_attachment(
+                        attachment=attachment,
+                        media_type=record.media_type,
+                        file_path=record.file_path,
+                        media_record_id=record.id,
+                        farmer_db_id=farmer_db_id,
+                        persist_observation=True,
+                        transcription_parts=transcription_parts,
+                        visual_summaries=visual_summaries,
+                    ) or escalation_required
                     self._ingestion.mark_processed(record.media_id)
-
-                # Video analysis path
-                elif media_type_enum == MediaType.VIDEO:
-                    if record.file_path:
-                        video_result = self._video.analyse_video(
-                            video_path=record.file_path,
-                            media_record_id=record.id,
-                            media_id=record.media_id,
-                            farmer_id=farmer_db_id or 0,
-                        )
-                        if video_result.success and video_result.consolidated_symptoms:
-                            visual_summaries.append(
-                                f"[Video: {video_result.frames_analysed} frames analysed] "
-                                + "; ".join(video_result.consolidated_symptoms[:5])
-                            )
-                        if video_result.recommended_action == "ESCALATE_AGRONOMIST":
-                            escalation_required = True
-                    self._ingestion.mark_processed(record.media_id)
+                    claimed = False
 
             except MediaIngestionError as e:
                 errors.append(f"Ingestion error ({attachment.wa_media_id}): {e}")
                 logger.error(f"MultimodalOrchestrator: {e}")
+                if claimed and record:
+                    self._record_processing_failure(
+                        record.media_id,
+                        str(e),
+                        retryable=getattr(
+                            e,
+                            "retryable",
+                            isinstance(e, MediaRetryableError),
+                        ),
+                    )
             except Exception as e:
                 errors.append(f"Unexpected error ({attachment.wa_media_id}): {e}")
                 logger.error(f"MultimodalOrchestrator: {e}", exc_info=True)
+                if claimed and record:
+                    self._record_processing_failure(record.media_id, str(e), retryable=True)
 
         # 3. Merge all text signals into a single context string
         merged_text = self._merge_context(
@@ -229,7 +232,7 @@ class MultimodalOrchestrator:
             # Nothing to reply to (e.g., image received but analysis unavailable and no text)
             status = "IGNORED" if not errors else "ERROR"
             reply = (
-                "🖼️ आपकी मीडिया मिली। "
+                "📎 आपकी मीडिया मिली। "
                 "कृपया अपनी फसल की समस्या टेक्स्ट में लिखें ताकि हम बेहतर जवाब दे सकें।"
                 if not errors else
                 "⚠️ मीडिया प्रोसेस करने में समस्या आई। कृपया टेक्स्ट में सवाल पूछें।"
@@ -245,6 +248,8 @@ class MultimodalOrchestrator:
         else:
             status = agent_response.status
             reply = agent_response.reply_text
+            if errors and reply:
+                reply += "\n\n⚠️ मीडिया प्रोसेस करने में समस्या आई। कृपया टेक्स्ट में सवाल पूछें।"
 
         return MultimodalResponse(
             status=status,
@@ -256,7 +261,77 @@ class MultimodalOrchestrator:
             escalation_required=escalation_required,
             processing_time_ms=t_ms,
             errors=errors,
+            analysis_persistence=analysis_persistence,
         )
+
+    def _analyse_attachment(
+        self,
+        attachment: MediaAttachment,
+        media_type: MediaType,
+        file_path: str,
+        media_record_id: Optional[int],
+        farmer_db_id: Optional[int],
+        persist_observation: bool,
+        transcription_parts: List[str],
+        visual_summaries: List[str],
+    ) -> bool:
+        if media_type in (MediaType.AUDIO, MediaType.VOICE_NOTE):
+            result = self._stt.transcribe(file_path)
+            if not result.success or not result.transcription or not result.transcription.strip():
+                raise _MediaAnalysisError(
+                    result.error_message or "Transcription provider returned no usable text.",
+                    retryable=getattr(result, "retryable", result.provider == "unavailable"),
+                )
+            transcription_parts.append(result.transcription)
+            if persist_observation:
+                self._store_transcription(attachment.wa_media_id, result)
+            return False
+
+        if media_type == MediaType.IMAGE:
+            result = self._vision.analyse_image(
+                image_path=file_path,
+                media_record_id=media_record_id,
+                media_id=attachment.wa_media_id,
+                farmer_id=farmer_db_id,
+                persist_observation=persist_observation,
+            )
+            if not result.success:
+                raise _MediaAnalysisError(
+                    result.error_message or "Vision provider returned no usable analysis.",
+                    retryable=result.retryable,
+                )
+            summary = self._format_visual_summary(result)
+            if summary:
+                visual_summaries.append(summary)
+            return result.recommended_action == "ESCALATE_AGRONOMIST"
+
+        if media_type == MediaType.VIDEO:
+            result = self._video.analyse_video(
+                video_path=file_path,
+                media_record_id=media_record_id,
+                media_id=attachment.wa_media_id,
+                farmer_id=farmer_db_id,
+                persist_observations=persist_observation,
+            )
+            if not result.success:
+                raise _MediaAnalysisError(
+                    result.error_message or "Video provider returned no usable analysis.",
+                    retryable=result.retryable,
+                )
+            if result.consolidated_symptoms:
+                visual_summaries.append(
+                    f"[Video: {result.frames_analysed} frames analysed] "
+                    + "; ".join(result.consolidated_symptoms[:5])
+                )
+            return result.recommended_action == "ESCALATE_AGRONOMIST"
+
+        raise MediaIngestionError(f"Unsupported resolved media type: {media_type.value}")
+
+    def _record_processing_failure(self, media_id: str, message: str, retryable: bool) -> None:
+        try:
+            self._ingestion.mark_failed(media_id, message, retryable=retryable)
+        except Exception:
+            logger.exception("Could not record media processing failure for %s.", media_id)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -285,7 +360,7 @@ class MultimodalOrchestrator:
                 profile._db_id = db_farmer.id
                 return profile
         except Exception as e:
-            logger.debug(f"MultimodalOrchestrator: DB farmer lookup failed for {phone}: {e}")
+            logger.debug("MultimodalOrchestrator: DB farmer lookup failed: %s", e)
 
         profile = FarmerProfile(name=name, phone=phone)
         profile._db_id = None

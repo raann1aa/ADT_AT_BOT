@@ -78,7 +78,7 @@ def process_multimodal_background(mm_request):
 
     try:
         result = multimodal_orchestrator.process(mm_request)
-        if result.reply_text and result.status not in ("IGNORED",):
+        if result.reply_text:
             # Enqueue in transactional outbox, then dispatch pending messages
             outbox_id = outbox_service.enqueue(
                 recipient_phone=mm_request.sender_phone,
